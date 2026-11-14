@@ -1,0 +1,20 @@
+[project]
+name = "fbt"
+version = "0.0.1"
+description = "Phone-camera full body tracking hub for VRChat on Quest"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "opencv-python",
+    "onnxruntime",
+    "rtmlib",
+    "mediapipe",
+    "python-osc",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
