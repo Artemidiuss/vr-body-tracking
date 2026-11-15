@@ -92,7 +92,7 @@ class RTMPoseBackend(PoseBackend):
     }
 
     def __init__(self, variant: str = "m", device: str = "cpu",
-                 det_frequency: int = 10, detector: str = "tiny",
+                 det_frequency: int = 1, detector: str = "tiny",
                  threads: int | None = None):
         from functools import partial
 

@@ -138,7 +138,7 @@ def _left_side_score(p: Pose3D) -> float:
 def triangulate_with_swap_check(cams, poses, prev: Pose3D | None = None,
                                 ref_lengths: np.ndarray | None = None,
                                 w_body: float = 1.0, w_motion: float = 0.3,
-                                **kw) -> Pose3D:
+                                hysteresis: float = 3.0, **kw) -> Pose3D:
     """Like triangulate_pose, but also tries flipping L/R labels per camera.
 
     Candidate cost = reprojection error (px) + w_body * body implausibility
@@ -161,6 +161,10 @@ def triangulate_with_swap_check(cams, poses, prev: Pose3D | None = None,
             m = r.valid & prev.valid
             if m.any():
                 c += w_motion * 100 * float(np.linalg.norm(r.points[m] - prev.points[m], axis=1).mean())
+            # Hysteresis: only change the relabelling decision for a clear win
+            # (measured: one-frame swap flip-flops caused ~12% of 3D spikes).
+            if list(r.swapped) != list(prev.swapped):
+                c += hysteresis
         return c
 
     results = []

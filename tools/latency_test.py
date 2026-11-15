@@ -8,6 +8,7 @@ encode + network + decode.
 
   .venv/bin/python -m tools.latency_test http://192.168.1.50:8080/video
   .venv/bin/python -m tools.latency_test http://127.0.0.1:8080/video   # USB via adb forward
+  .venv/bin/python -m tools.latency_test 192.168.31.81                 # our FBT Cam app
 
 Press q to stop early.
 """
@@ -21,6 +22,7 @@ import time
 import cv2
 import numpy as np
 
+from fbt.fbtcam import FBTCamSource
 from fbt.sources import OpenCVSource
 
 
@@ -31,12 +33,25 @@ def main():
     ap.add_argument("--period", type=float, default=1.0, help="seconds per blink")
     a = ap.parse_args()
 
-    src = OpenCVSource("phone", a.url).start()
+    if a.url.startswith("http"):
+        src = OpenCVSource("phone", a.url).start()
+    else:  # FBT Cam app: host[:port]
+        host, _, port = a.url.partition(":")
+        src = FBTCamSource("phone", host, int(port or 5000)).start()
     win = "latency-test"
+    # A big normal window on top (macOS full screen opens a separate Space
+    # the camera does not see).
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    cv2.setWindowProperty(win, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    black = np.zeros((400, 400, 3), np.uint8)
-    white = np.full((400, 400, 3), 255, np.uint8)
+    cv2.resizeWindow(win, 1600, 1000)
+    cv2.moveWindow(win, 0, 0)
+    cv2.setWindowProperty(win, cv2.WND_PROP_TOPMOST, 1)
+    black = np.zeros((1000, 1600, 3), np.uint8)
+    white = np.full((1000, 1600, 3), 255, np.uint8)
+
+    def brightness(img):  # centre of the frame, where the screen is
+        h, w = img.shape[:2]
+        return float(cv2.cvtColor(img[h // 4: 3 * h // 4, w // 4: 3 * w // 4],
+                                  cv2.COLOR_BGR2GRAY).mean())
 
     # Calibrate brightness levels for black and white screens.
     levels = {}
@@ -49,7 +64,7 @@ def main():
             f = src.latest(last)
             if f is not None:
                 last = f.index
-                vals.append(float(cv2.cvtColor(f.image, cv2.COLOR_BGR2GRAY).mean()))
+                vals.append(brightness(f.image))
         if not vals:
             print("no frames from the phone — check the URL")
             return
@@ -76,7 +91,7 @@ def main():
                 continue
             last = f.index
             fps_frames += 1
-            b = float(cv2.cvtColor(f.image, cv2.COLOR_BGR2GRAY).mean())
+            b = brightness(f.image)
             if not detected and ((b > mid) == state):
                 lat.append((f.received_at - t_toggle) * 1000)
                 detected = True
@@ -89,8 +104,11 @@ def main():
         print("no transitions detected")
         return
     print(f"received fps: {fps_frames / wall:.1f}, dropped by hub: {src.dropped}")
-    print(f"latency ms over {len(lat)} blinks: median {statistics.median(lat):.0f}, "
+    print(f"screen->decoded latency ms over {len(lat)} blinks: median {statistics.median(lat):.0f}, "
           f"min {min(lat):.0f}, max {max(lat):.0f}")
+    if hasattr(src, "latency_ms") and src.latency_ms:
+        print(f"for comparison, sensor-timestamp latency reported by the app: "
+              f"median {statistics.median(src.latency_ms):.0f} ms")
 
 
 if __name__ == "__main__":

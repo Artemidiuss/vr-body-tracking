@@ -20,14 +20,16 @@ VRCHAT_PORT = 9000
 @dataclass
 class Tracker:
     id: str                                   # "1".."8" or "head"
-    position: tuple[float, float, float]
-    rotation: tuple[float, float, float]
+    position: tuple[float, float, float] | None
+    rotation: tuple[float, float, float] | None  # None = do not send
 
 
 def build_bundle(trackers: list[Tracker]) -> bytes:
     bundle = OscBundleBuilder(IMMEDIATELY)
     for t in trackers:
         for kind, vals in (("position", t.position), ("rotation", t.rotation)):
+            if vals is None:
+                continue
             msg = OscMessageBuilder(address=f"/tracking/trackers/{t.id}/{kind}")
             for v in vals:
                 msg.add_arg(float(v))
@@ -40,6 +42,14 @@ class VRChatSender:
         self.addr = (host, port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
+        self.errors = 0
+
     def send(self, trackers: list[Tracker]) -> None:
-        if trackers:
+        """Never raises: a sleeping headset drops off Wi-Fi ("no route to
+        host") and must not kill the hub; sending resumes when it is back."""
+        if not trackers:
+            return
+        try:
             self.sock.sendto(build_bundle(trackers), self.addr)
+        except OSError:
+            self.errors += 1

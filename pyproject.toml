@@ -10,6 +10,11 @@ dependencies = [
     "rtmlib",
     "mediapipe",
     "python-osc",
+    "scipy",
+    "av",
+    "onnx",
+    "onnxslim",
+    "zeroconf",
 ]
 
 [project.optional-dependencies]
