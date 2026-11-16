@@ -13,3 +13,4 @@ android/**/.idea/
 
 # macOS app build output
 macapp/build/
+*.egg-info/

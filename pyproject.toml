@@ -1,8 +1,13 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "fbt"
 version = "0.0.1"
 description = "Phone-camera full body tracking hub for VRChat on Quest"
 requires-python = ">=3.11"
+license = { file = "LICENSE.md" }
 dependencies = [
     "numpy",
     "opencv-python",
@@ -23,3 +28,9 @@ dev = ["pytest"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+include = ["fbt*", "fbtapp*"]
+
+[tool.setuptools.package-data]
+fbtapp = ["ui/*"]
