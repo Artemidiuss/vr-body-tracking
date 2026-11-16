@@ -192,6 +192,7 @@ class MainActivity : Activity() {
         server?.config = null
         server?.resetClockDetection()
         server?.hello = helloJson(cfg).toByteArray()
+        server?.dropViewer()
         val noPreview = !showPreview || intent?.getBooleanExtra("nopreview", false) == true
         streamer = CameraStreamer(this, cfg, if (noPreview || st == null) null else Surface(st),
             onConfig = { server?.config = it },

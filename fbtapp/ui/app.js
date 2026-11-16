@@ -184,6 +184,7 @@ function renderPanel() {
     const unseen = S.cams.filter(c => c.state === "online" && !c.person).map(c => c.name);
     let txt = "", muted = false;
     if (off.length) txt = `Не в мережі: ${off.join(", ")} — відкрий FBT Cam на телефоні`;
+    else if (S.cams.some(c => c.size_changed)) txt = `Змінилась роздільність: ${S.cams.filter(c => c.size_changed).map(c => c.name).join(", ")} — відкалібруй ще раз`;
     else if (S.calibrated && S.tracking.mismatch) txt = "Схоже, камери зрушили — відкалібруй ще раз";
     else if (seen.length && unseen.length) txt = `Тебе не видно: ${unseen.join(", ")}`;
     else { txt = "У грі стань у Т-позу на секунду (зручно разом з Calibrate FBT у VRChat) — трекери вирівняються"; muted = true; }

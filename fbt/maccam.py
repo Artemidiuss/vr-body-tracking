@@ -84,16 +84,18 @@ class MacCamSource(CameraSource):
 
 
 def open_source(camera_id: str, host: str):
-    """'mac' -> MacBook camera, 'replay:<rec_dir>/camN' -> a recording played live,
+    """'mac' -> MacBook camera ('mac@1920x1080', 'mac:1' for another device),
+    'replay:<rec_dir>/camN' -> a recording played live,
     anything else -> FBT Cam phone 'ip[:port]'."""
     if host.startswith("replay:"):
         import os
         from .sources import ReplaySource
         path = host[len("replay:"):]
         return ReplaySource(camera_id, os.path.dirname(path), os.path.basename(path))
-    if host == "mac" or host.startswith("mac:"):
-        dev = host.partition(":")[2] or "0"
-        return MacCamSource(camera_id, device=dev)
+    if host == "mac" or host.startswith(("mac:", "mac@")):
+        spec, _, size = host.partition("@")
+        dev = spec.partition(":")[2] or "0"
+        return MacCamSource(camera_id, device=dev, size=size or "1280x720")
     from .fbtcam import FBTCamSource
     ip, _, port = host.partition(":")
     return FBTCamSource(camera_id, ip, int(port or 5000))

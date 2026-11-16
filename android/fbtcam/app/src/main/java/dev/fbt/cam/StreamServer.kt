@@ -67,6 +67,10 @@ class StreamServer(
         client.getAndSet(null)?.close()
     }
 
+    /** The stream format changed (another camera or mode): the viewer must reconnect to get
+     *  the new HELLO and CONFIG, otherwise it decodes the new frames with the old SPS/PPS. */
+    fun dropViewer() { client.getAndSet(null)?.close() }
+
     fun sendFrame(data: ByteArray, ptsUs: Long, key: Boolean) {
         detectClock(ptsUs)
         client.get()?.offerFrame(Packet(Proto.FRAME, if (key) 1 else 0, 0, ptsUs, data))

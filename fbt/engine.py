@@ -70,7 +70,7 @@ def enabled_trackers(st: dict) -> tuple:
 
 
 def friendly_name(host: str, info: dict | None) -> str | None:
-    if host == "mac" or host.startswith("mac:"):
+    if host == "mac" or host.startswith(("mac:", "mac@")):
         return "MacBook"
     d = (info or {}).get("device", "")
     if not d:
@@ -262,6 +262,7 @@ class CamSlot:
         self.pose_ms, self.n_pose, self.n_frames, self.errors = 0.0, 0, 0, 0
         self.rec: list | None = None                    # (t_capture, kp, sc) while calibrating
         self.rec_size = None
+        self.size = None                                # (w, h) of the latest frame
         self.rate_pose = self.rate_in = 0.0
         self.offline_since: float | None = time.perf_counter()
         self._last_t = -1e9
@@ -330,6 +331,7 @@ class CamSlot:
                 continue
             last, last_new = f.index, time.perf_counter()
             self.n_frames += 1
+            self.size = (f.image.shape[1], f.image.shape[0])
             if self.state != "online":
                 self.state, self.error, self.offline_since = "online", "", None
             rec = self.rec
@@ -1030,6 +1032,12 @@ class Engine:
             for r in recorders:
                 r.halt.set()
 
+    def _size_changed(self, s) -> bool:
+        """The camera now sends another resolution than it was calibrated at (the mode was
+        changed in FBT Cam): the calibration's focal and centre are in the old pixels."""
+        return (s.index < len(self.cams) and s.size is not None
+                and s.size != (self.cams[s.index].width, self.cams[s.index].height))
+
     # ---------------- snapshot for the UI
     def snapshot(self, with_skeleton: bool = True) -> dict:
         now = time.perf_counter()
@@ -1042,7 +1050,8 @@ class Engine:
                 "battery": st.get("battery"), "charging": st.get("charging"),
                 "hot": bool(st and (st.get("thermal", -1) >= 2 or st.get("temp_c", 0) >= 42)),
                 "person": now - s.person_t < 1.0, "fps": round(s.rate_pose, 1),
-                "calibrated": s.index < len(self.cams),
+                "calibrated": s.index < len(self.cams) and not self._size_changed(s),
+                "size_changed": self._size_changed(s),
             })
         out = self.out
         snap = {
@@ -1050,7 +1059,7 @@ class Engine:
             "hmd": {"ok": self.hmd.fresh, "rate": round(self.hmd.rate), "queries": self.hmd.queries,
                     "datagrams": self.hmd.datagrams},
             "mac_battery": self.mac_battery,
-            "calibrated": len(self.cams) >= 2,
+            "calibrated": len(self.cams) >= 2 and not any(c["size_changed"] for c in cams),
             "calib_info": {"time": self.calib_time, "quality": quality(self.calib_meta) if self.cams else None,
                            "n": len(self.cams)},
             "calib": self._calib_view(),
