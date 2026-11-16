@@ -154,7 +154,8 @@ class MainActivity : Activity() {
             clockRealtime = { streamer != null && modes.getOrNull(modeSpinner.selectedItemPosition)?.cam?.timestampRealtime == true },
             onKeyframeNeeded = { streamer?.requestKeyframe() },
             log = ::log,
-            status = ::statusJson).also { it.start() }
+            status = ::statusJson,
+            onRemeter = { streamer?.remeter() }).also { it.start() }
     }
 
     /** Battery and heat for the Mac's status screen, and gravity for its calibration (STATUS packet). */
@@ -175,6 +176,7 @@ class MainActivity : Activity() {
             put("temp_c", tempC)
             put("thermal", thermal)
             gravity.json()?.let { put("gravity", it) }
+            streamer?.exposureJson()?.let { put("exposure", it) }
         }.toString().toByteArray()
     }
 

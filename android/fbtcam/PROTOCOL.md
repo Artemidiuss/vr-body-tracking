@@ -28,7 +28,8 @@ everything — video, metadata and clock sync — goes through the same socket.
 | 3 PING | Mac→phone | Mac time, ns | empty |
 | 4 PONG | phone→Mac | Mac time echoed, ns | 8 bytes: phone clock, ns (same clock as FRAME ts) |
 | 5 KEYFRAME_REQ | Mac→phone | 0 | empty |
-| 6 STATUS | phone→Mac | 0 | UTF-8 JSON: battery (%), charging, plugged, temp_c (battery), thermal (Android thermal status 0–6, −1 unknown), gravity {v: [x, y, z] m/s² mean of the last 2 s in device axes (X right, Y up, Z out of the screen; points up), sd_deg: spread of the samples, n}. Sent on every PING (once a second). Older receivers ignore it |
+| 6 STATUS | phone→Mac | 0 | UTF-8 JSON: battery (%), charging, plugged, temp_c (battery), thermal (Android thermal status 0–6, −1 unknown), gravity {v: [x, y, z] m/s² mean of the last 2 s in device axes (X right, Y up, Z out of the screen; points up), sd_deg: spread of the samples, n}. exposure {ms, iso, held}: the current exposure and whether it is held. Sent on every PING (once a second). Older receivers ignore it |
+| 7 EXPOSURE | Mac→phone | 0 | empty. Meter the light again (auto exposure for ~3 s), then hold it: the same brightness (median exposure × ISO of the last 1.5 s) at 10/20/30 ms, white balance held too. The phone also does this once when the camera starts. Older phones ignore it |
 
 ## Clock sync
 

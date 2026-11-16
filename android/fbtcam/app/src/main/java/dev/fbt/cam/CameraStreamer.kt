@@ -3,10 +3,13 @@ package dev.fbt.cam
 import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.camera2.CameraCaptureSession
+import android.hardware.camera2.CameraCharacteristics
 import android.hardware.camera2.CameraConstrainedHighSpeedCaptureSession
 import android.hardware.camera2.CameraDevice
 import android.hardware.camera2.CameraManager
 import android.hardware.camera2.CaptureRequest
+import android.hardware.camera2.CaptureResult
+import android.hardware.camera2.TotalCaptureResult
 import android.hardware.camera2.params.OutputConfiguration
 import android.hardware.camera2.params.SessionConfiguration
 import android.media.MediaCodec
@@ -15,9 +18,11 @@ import android.media.MediaFormat
 import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.SystemClock
 import android.util.Range
 import android.view.Surface
 import java.util.concurrent.Executor
+import org.json.JSONObject
 
 data class StreamConfig(
     val cam: CamInfo,
@@ -53,6 +58,43 @@ class CameraStreamer(
     private var session: CameraCaptureSession? = null
     @Volatile var encodedFrames = 0L
     private val latencies = ArrayDeque<Double>()
+    // ---- exposure: metered automatically for a few seconds, then held (see lockExposure)
+    private var surfaces: List<Surface> = emptyList()
+    private var meterSince = 0L
+    private var manualExp: Pair<Long, Int>? = null   // exposure ns, ISO while held manually
+    private var aeLock = false                       // held by AE lock (no manual sensor control)
+    @Volatile private var expNs = 0L
+    @Volatile private var iso = 0
+    @Volatile private var held = false
+    private val metered = ArrayDeque<Pair<Long, Double>>()   // (time ms, exposure ns x ISO) while metering
+    private var checkAt = 0L                         // when to check that the phone obeys the manual exposure
+    private val chars by lazy { ctx.getSystemService(CameraManager::class.java).getCameraCharacteristics(cfg.cam.id) }
+    private val captureCb = object : CameraCaptureSession.CaptureCallback() {
+        override fun onCaptureCompleted(s: CameraCaptureSession, r: CaptureRequest, res: TotalCaptureResult) {
+            res.get(CaptureResult.SENSOR_EXPOSURE_TIME)?.let { expNs = it }
+            res.get(CaptureResult.SENSOR_SENSITIVITY)?.let { iso = it }
+            val now = SystemClock.elapsedRealtime()
+            val m = manualExp
+            if (held && m != null && checkAt in 1..now) {
+                checkAt = 0
+                // Some HALs take the keys but keep auto exposure: then hold it with AE lock instead.
+                if (kotlin.math.abs(expNs - m.first) > m.first / 5) {
+                    log("manual exposure ignored (asked ${m.first / 1_000_000} ms, got ${"%.1f".format(expNs / 1e6)} ms): AE lock")
+                    manualExp = null; aeLock = true
+                    try { applyRequest(device ?: return, session ?: return) } catch (_: Exception) {}
+                }
+            }
+            if (held || meterSince == 0L) return
+            if (expNs > 0 && iso > 0) {
+                metered.addLast(now to expNs.toDouble() * iso)
+                while (metered.isNotEmpty() && now - metered.first().first > 1500) metered.removeFirst()
+            }
+            val dt = now - meterSince
+            val ae = res.get(CaptureResult.CONTROL_AE_STATE)
+            if ((dt > 2500 && ae == CaptureResult.CONTROL_AE_STATE_CONVERGED) || dt > 6000) lockExposure()
+        }
+    }
+
     /** Clock the sensor stamps frames with (detected by StreamServer). */
     @Volatile var clockNs: () -> Long = { System.nanoTime() }
 
@@ -134,6 +176,77 @@ class CameraStreamer(
     }
 
     private fun startRepeating(d: CameraDevice, s: CameraCaptureSession, surfaces: List<Surface>) {
+        this.surfaces = surfaces
+        manualExp = null; aeLock = false; held = false
+        metered.clear()
+        meterSince = SystemClock.elapsedRealtime()
+        applyRequest(d, s)
+        log("streaming ${cfg.width}x${cfg.height} @${cfg.fps}${if (cfg.highSpeed) " high-speed" else ""}, cam ${cfg.cam.id}")
+    }
+
+    /**
+     * Auto exposure keeps re-metering: when you walk up to a camera or a light wall fills the
+     * frame, the whole room goes darker or brighter, and at 30 fps indoors it picks long
+     * exposures that smear fast legs. So it meters for ~3 s, then the exposure is held:
+     * the same brightness (exposure x ISO) but at most 10 / 20 / 30 ms (multiples of the
+     * 10 ms flicker of 50 Hz lights, so lamps do not band), and white balance held too.
+     * The Mac asks for a fresh metering at the start of a calibration or a game (remeter()).
+     */
+    private fun lockExposure() {
+        val d = device ?: return
+        val s = session ?: return
+        val t = expNs; val i = iso
+        if (t <= 0 || i <= 0 || metered.isEmpty()) return
+        // the median light of the last 1.5 s, not one frame: a passing shadow or flash does not stick
+        val light = metered.map { it.second }.sorted()[metered.size / 2]
+        metered.clear()
+        held = true
+        val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
+        val aeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ?: IntArray(0)
+        val keys = chars.availableCaptureRequestKeys
+        // Not every camera that takes manual exposure says MANUAL_SENSOR (the Galaxy A32's
+        // camera 50 does not): the AE-off mode and the two keys are enough to try.
+        val manual = !cfg.highSpeed && (CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_MANUAL_SENSOR in caps ||
+            (CameraCharacteristics.CONTROL_AE_MODE_OFF in aeModes && CaptureRequest.SENSOR_EXPOSURE_TIME in keys &&
+             CaptureRequest.SENSOR_SENSITIVITY in keys))
+        if (manual) { manualExp = chooseExposure(t, i, light); checkAt = SystemClock.elapsedRealtime() + 1500 }
+        else aeLock = true
+        try { applyRequest(d, s) } catch (e: Exception) { log("exposure hold failed: $e") }
+        val m = manualExp
+        log(if (m != null) "exposure held: ${"%.1f".format(m.first / 1e6)} ms ISO ${m.second} (auto was ${"%.1f".format(t / 1e6)} ms ISO $i)"
+            else "exposure held (AE lock): ${"%.1f".format(t / 1e6)} ms ISO $i")
+    }
+
+    private fun chooseExposure(t: Long, i: Int, light: Double): Pair<Long, Int> {
+        val isoRange = chars.get(CameraCharacteristics.SENSOR_INFO_SENSITIVITY_RANGE) ?: Range(i, i)
+        val expRange = chars.get(CameraCharacteristics.SENSOR_INFO_EXPOSURE_TIME_RANGE) ?: Range(t, t)
+        val isoCap = minOf(isoRange.upper, 1600)
+        for (ms in longArrayOf(10, 20, 30)) {
+            val c = ms * 1_000_000L
+            if (c >= t || c > 1_000_000_000L / cfg.fps || c !in expRange) break
+            val need = (light / c).toInt()
+            if (need <= isoCap) return c to need.coerceIn(isoRange.lower, isoRange.upper)
+        }
+        return t to (light / t).toInt().coerceIn(isoRange.lower, isoRange.upper)   // bright room or no headroom
+    }
+
+    /** Meter the light again (the Mac sends EXPOSURE when a calibration or a game starts). */
+    fun remeter() {
+        handler.post {
+            val d = device ?: return@post
+            val s = session ?: return@post
+            manualExp = null; aeLock = false; held = false
+            metered.clear()
+            meterSince = SystemClock.elapsedRealtime()
+            try { applyRequest(d, s) } catch (e: Exception) { log("remeter failed: $e") }
+        }
+    }
+
+    fun exposureJson(): JSONObject? = if (expNs <= 0) null else JSONObject().apply {
+        put("ms", Math.round(expNs / 1e5) / 10.0); put("iso", iso); put("held", held)
+    }
+
+    private fun applyRequest(d: CameraDevice, s: CameraCaptureSession) {
         // PREVIEW template + fast processing: the RECORD template asks the ISP for
         // high-quality noise reduction/edge enhancement, which costs latency.
         val b = d.createCaptureRequest(
@@ -145,15 +258,22 @@ class CameraStreamer(
         surfaces.forEach { b.addTarget(it) }
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(cfg.fps, cfg.fps))
         if (cfg.exposureCompSteps != 0) b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, cfg.exposureCompSteps)
+        val m = manualExp
+        if (m != null) {
+            b.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_OFF)
+            b.set(CaptureRequest.SENSOR_EXPOSURE_TIME, m.first)
+            b.set(CaptureRequest.SENSOR_SENSITIVITY, m.second)
+            if (CaptureRequest.SENSOR_FRAME_DURATION in chars.availableCaptureRequestKeys)
+                b.set(CaptureRequest.SENSOR_FRAME_DURATION, 1_000_000_000L / cfg.fps)
+        } else if (aeLock) b.set(CaptureRequest.CONTROL_AE_LOCK, true)
+        if (held) b.set(CaptureRequest.CONTROL_AWB_LOCK, true)
         if (cfg.highSpeed) {
             val hs = s as CameraConstrainedHighSpeedCaptureSession
-            hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), null, handler)
-            log("streaming ${cfg.width}x${cfg.height} @${cfg.fps} high-speed, cam ${cfg.cam.id}")
+            hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), captureCb, handler)
         } else {
             b.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO)
             b.set(CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE, CaptureRequest.CONTROL_VIDEO_STABILIZATION_MODE_OFF)
-            s.setRepeatingRequest(b.build(), null, handler)
-            log("streaming ${cfg.width}x${cfg.height} @${cfg.fps}, cam ${cfg.cam.id}")
+            s.setRepeatingRequest(b.build(), captureCb, handler)
         }
     }
 

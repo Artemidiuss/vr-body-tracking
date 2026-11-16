@@ -797,6 +797,7 @@ class Engine:
                 shutil.copy(self.calib_path, f"{self.d}/logs/session_{stamp}_calib.json")
             self.stab = self._new_stab()      # learn bone lengths fresh, standing in the play area
             self.mode, self.server_t0 = "server", time.perf_counter()
+            self._remeter()
         try:   # keep the display awake while the server runs
             self._caffeinate = subprocess.Popen(["caffeinate", "-d", "-i", "-w", str(os.getpid())])
         except OSError:
@@ -820,6 +821,14 @@ class Engine:
             self._caffeinate.terminate()
             self._caffeinate = None
         return {"ok": True}
+
+    def _remeter(self):
+        """Phones meter the light afresh and hold it for what follows (a calibration or a game):
+        the exposure no longer jumps when you walk up to a camera."""
+        for s in self.slots[:2]:
+            fn = getattr(s.src, "remeter_exposure", None)
+            if fn:
+                fn()
 
     # ---------------- sleep: no cameras, no pose models, nothing on the GPU
     def sleep(self, auto: bool = False) -> dict:
@@ -912,6 +921,8 @@ class Engine:
                 cams = " | ".join(f"cam{s.index}: {s.state} in {s.rate_in:4.1f} pose {s.rate_pose:4.1f}/s "
                                   f"{s.pose_ms:3.0f} ms lat "
                                   f"{np.median(s.src.latency_ms[-30:]) if s.src and s.src.latency_ms else 0:3.0f}"
+                                  + (f" exp {e['ms']}ms/{e['iso']}{'' if e.get('held') else ' auto'}"
+                                     if (e := s.status().get("exposure")) else "")
                                   for s in self.slots)
                 try:
                     self._statsf.write(f"{time.strftime('%H:%M:%S')} 3D {self.fps3d:4.1f} fps | {cams} | "
@@ -971,6 +982,7 @@ class Engine:
         self._cancel.clear()
         secs = float(self.settings["calib_seconds"])
         self.calib = {"state": "countdown", "t_start": time.time() + 3, "seconds": secs}
+        self._remeter()
         threading.Thread(target=self._calibrate, args=(secs,), daemon=True).start()
         return {"ok": True}
 

@@ -23,7 +23,7 @@ from .sources import CameraSource, Frame
 
 MAGIC = b"FBT1"
 HDR = struct.Struct(">4sBBHIqI")  # magic type flags rsv seq ts len  (24 bytes)
-HELLO, CONFIG, FRAME, PING, PONG, KEYFRAME_REQ, STATUS = range(7)
+HELLO, CONFIG, FRAME, PING, PONG, KEYFRAME_REQ, STATUS, EXPOSURE = range(8)
 
 
 class ClockSync:
@@ -94,6 +94,14 @@ class FBTCamSource(CameraSource):
 
     def request_keyframe(self):
         self._send(KEYFRAME_REQ)
+
+    def remeter_exposure(self):
+        """Ask the phone to meter the light again (~3 s) and then hold that exposure.
+        Older FBT Cam versions ignore it."""
+        try:
+            self._send(EXPOSURE)
+        except OSError:
+            pass
 
     def start(self):
         super().start()

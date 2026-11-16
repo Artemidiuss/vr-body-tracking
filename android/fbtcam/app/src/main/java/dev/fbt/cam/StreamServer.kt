@@ -20,6 +20,7 @@ object Proto {
     const val PONG = 4
     const val KEYFRAME_REQ = 5
     const val STATUS = 6
+    const val EXPOSURE = 7       // Mac -> phone: meter the light again, then hold it
     val MAGIC = byteArrayOf('F'.code.toByte(), 'B'.code.toByte(), 'T'.code.toByte(), '1'.code.toByte())
 }
 
@@ -37,6 +38,7 @@ class StreamServer(
     private val onKeyframeNeeded: () -> Unit,
     private val log: (String) -> Unit,
     private val status: () -> ByteArray = { ByteArray(0) },
+    private val onRemeter: () -> Unit = {},
 ) {
     @Volatile var hello: ByteArray = ByteArray(0)
     @Volatile var config: ByteArray? = null
@@ -147,6 +149,7 @@ class StreamServer(
                             }
                         }
                         Proto.KEYFRAME_REQ -> onKeyframeNeeded()
+                        Proto.EXPOSURE -> onRemeter()
                     }
                 }
             } catch (e: Exception) {
