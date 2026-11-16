@@ -47,7 +47,7 @@ def unity_R(euler_deg) -> np.ndarray:
 class HmdAlign:
     LAG = -0.06          # our stabilised head trails the headset by ~60 ms (filter), measured
     WINDOW = 40.0        # s of pairs used for a fit
-    WORN_ERR = 0.10      # m: a pair further than this from the current fit = headset not on the head
+    WORN_ERR = 0.10      # m: pairs further than this from the link are not learned from
 
     def __init__(self):
         self.pairs = collections.deque()      # (t, q(3), p(3), R(3,3))
@@ -62,26 +62,24 @@ class HmdAlign:
         self._bad_since = None
         self.lost = False                     # worn but off the link for 5 s: ask for a T-pose
         self._recent = collections.deque()
-        self._together_since = self._apart_since = None
+        self._on_since = self._off_since = None
         self.lock = threading.Lock()
 
     # ---------------- data
-    def _moving_together(self, t_cap, q, p) -> bool:
-        """Is the headset on the head? Judged from motion alone, not from the fit: over the
-        last 1.5 s the headset must move about as much as our head does. A headset lying
-        on the table stays still while the head moves; one carried in a hand moves alone.
-        (Judging by the fit let a headset put down on the table drag the fit away.)"""
-        self._recent.append((t_cap, q, p))
+    D0 = np.array([0.0, 0.06, 0.09])   # headset vs head root before the first fit (measured)
+
+    def _motion(self, t_cap, q, root):
+        """How far our head root and the headset's head root moved in the last 1.5 s.
+        Head roots on both sides: the headset itself sits ~10 cm in front of the ears and
+        swings on every nod, which made a worn headset look like it moved on its own."""
+        self._recent.append((t_cap, q, root))
         while self._recent and t_cap - self._recent[0][0] > 1.5:
             self._recent.popleft()
         if len(self._recent) < 10:
-            return False
+            return 0.0, 0.0
         Q = np.array([r[1] for r in self._recent])
         P = np.array([r[2] for r in self._recent])
-        mq, mp = np.ptp(Q, axis=0).max(), np.ptp(P, axis=0).max()
-        if mp > 1.0:                                   # 1 m in 1.5 s: carried, not worn
-            return False
-        return abs(mp - mq) < max(0.04, 0.5 * mq)
+        return float(np.ptp(Q, axis=0).max()), float(np.ptp(P, axis=0).max())
 
     def add(self, t_cap: float, q_root: np.ndarray, hmd_at) -> None:
         """q_root: our head root (Unity frame) at capture time t_cap.
@@ -93,31 +91,33 @@ class HmdAlign:
         p, e = np.asarray(h[0], float), np.asarray(h[1], float)
         R = unity_R(e)
         with self.lock:
-            together = self._moving_together(t_cap, q, p)
-            # hysteresis: a few odd frames must not flip the head anchor back and forth
-            if together:
-                self._apart_since = None
-                self._together_since = self._together_since or t_cap
-            else:
-                self._together_since = None
-                self._apart_since = self._apart_since or t_cap
-            if not together:
-                if self._apart_since is not None and t_cap - self._apart_since > 1.0:
+            root = p - R @ (self.x[5:8] if self.x is not None else self.D0)
+            mq, mp = self._motion(t_cap, q, root)
+            r = None if self.x is None else float(np.linalg.norm(self.predict_hmd(q, R) - p))
+            # Worn? Only clear evidence of a headset off the head, held 2 s, says no: it lies
+            # still while we move, it is carried around, or it is far from the link.
+            off = (mq > 0.10 and mp < 0.02) or (mp - mq > 0.30) or (r is not None and r > 0.25)
+            if off:
+                self._on_since = None
+                self._off_since = self._off_since or t_cap
+                if t_cap - self._off_since >= 2.0:
                     self.worn = False
+            else:
+                self._off_since = None
+                self._on_since = self._on_since or t_cap
+                if t_cap - self._on_since >= 0.5:
+                    self.worn = True
+            # Learn only from clean pairs: both head roots moving alike, close to the link.
+            if mq == 0.0 or abs(mp - mq) >= max(0.04, 0.5 * mq):
                 return
-            if self.x is not None:
-                r = np.linalg.norm(self.predict_hmd(q, R) - p)
+            if r is not None:
                 if r >= self.WORN_ERR:
                     # On the head but off the link (the headset space was recentred, or the
-                    # link is wrong): nothing is learned from it; after 5 s the app asks for
-                    # a T-pose, which resets the link (reset_from_pose).
-                    self.worn = False
+                    # link is wrong): after 5 s the app asks for a T-pose (reset_from_pose).
                     self._bad_since = self._bad_since or t_cap
                     self.lost = t_cap - self._bad_since > 5.0
                     return
                 self._bad_since, self.lost = None, False
-                if self._together_since is not None and t_cap - self._together_since > 0.5:
-                    self.worn = True
             self.pairs.append((t_cap, q, p, R))
             while self.pairs and t_cap - self.pairs[0][0] > self.WINDOW:
                 self.pairs.popleft()
@@ -153,7 +153,7 @@ class HmdAlign:
         with self.lock:
             yaw = np.radians(float(euler_hmd[1]) - facing_yaw_deg)
             ls = 0.0 if self.log_s is None else self.log_s
-            d = self.x[5:8].copy() if self.x is not None else np.array([0.0, 0.06, 0.09])
+            d = self.x[5:8].copy() if self.x is not None else self.D0.copy()
             t0 = np.asarray(p_hmd, float) - R_h @ d - np.exp(ls) * (Ry(yaw) @ np.asarray(q_root, float))
             self.x = np.r_[yaw, t0, ls, d]
             self.target = self.x.copy()
