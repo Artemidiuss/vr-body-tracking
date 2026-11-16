@@ -2,10 +2,7 @@
 the preview, calibration from the poses computed live, and the VRChat tracker
 pipeline.
 
-The tracker pipeline is the production path of tools/run_hub.py (--head tpose,
-its live knob files in data/), which stays as the CLI for experiments. The app keeps
-those values in data/app_settings.json (imported from the knob files once) and the
-settings window changes them live.
+Settings live in data/app_settings.json; the settings window changes them live.
 """
 
 from __future__ import annotations
@@ -60,13 +57,6 @@ DEFAULTS = {
 }
 TUNABLE = {"hmd_anchor", "smooth_hz", "predict_ms", "head_offset_cm", "head_predict_ms", "head_smooth_hz", "yaw_trim",
            "extra_fps", "track_chest", "track_knees", "track_elbows", "foot_flat"}
-# Old live-knob files in data/ (tools/run_hub.py) -> settings, imported once.
-KNOB_FILES = {"head_offset": ("head_offset_cm", lambda v: round(float(v) * 100)),
-              "head_predict_ms": ("head_predict_ms", float), "head_smooth_hz": ("head_smooth_hz", float),
-              "predict_ms": ("predict_ms", float), "yaw_trim": ("yaw_trim", float),
-              "foot_mode": ("foot_flat", lambda v: v.strip() == "flat"),
-              "use_mac": ("use_mac", lambda v: v.strip() != "0")}
-
 
 def enabled_trackers(st: dict) -> tuple:
     t = ["hip", "left_foot", "right_foot"]
@@ -433,7 +423,7 @@ class VideoRecorder(threading.Thread):
 
 
 class TrackerOutput:
-    """Skeleton -> VRChat trackers + the head anchor (tools/run_hub.py, --head tpose)."""
+    """Skeleton -> VRChat trackers + the head anchor."""
 
     def __init__(self, sender: VRChatSender, settings: dict, log_path: str | None, align=None, hmd=None):
         self.sender, self.st = sender, settings
@@ -462,7 +452,7 @@ class TrackerOutput:
         now = time.perf_counter()
         hp = head_tracker(S, source="torso")                  # used for the yaw only
         # Anchor = the real head root (ear midpoint, 4 cm down the spine), smoothed and
-        # predicted: VRChat re-anchors all trackers to it every frame (see run_hub.py).
+        # predicted: VRChat re-anchors all trackers to it every frame.
         Su = to_unity(S)
         sp = Su[IDX["neck"]] - Su[IDX["hip"]]
         root = (Su[IDX["left_ear"]] + Su[IDX["right_ear"]]) / 2 - 0.04 * sp / np.linalg.norm(sp)
@@ -631,12 +621,6 @@ class Engine:
             saved = json.load(open(self.settings_path))
         except (OSError, ValueError):
             pass
-        for f, (k, conv) in KNOB_FILES.items():
-            if k not in saved:
-                try:
-                    s[k] = conv(open(f"{self.d}/{f}").read().strip())
-                except (OSError, ValueError):
-                    pass
         names = {**s["names"], **saved.get("names", {})}
         s.update(saved)
         s["names"] = names

@@ -24,15 +24,10 @@ def test_names():
     assert friendly_name("1.2.3.4", {"device": "Xiaomi 23053RN02Y"}) == "Redmi"
 
 
-def test_settings_import_knob_files(tmp_path):
-    (tmp_path / "head_offset").write_text("-0.07")
-    (tmp_path / "foot_mode").write_text("flat")
+def test_settings_file_wins_over_defaults(tmp_path):
     e = Engine.__new__(Engine)          # settings logic only, no cameras / threads
     e.d, e.settings_path = str(tmp_path), str(tmp_path / "app_settings.json")
     e.cams, e.calib_hosts = [], []
-    s = e._load_settings()
-    assert s["head_offset_cm"] == -7 and s["foot_flat"] is True
-    assert s["smooth_hz"] == DEFAULTS["smooth_hz"]
-    # once saved, the settings file wins over the knob files
+    assert e._load_settings()["head_offset_cm"] == DEFAULTS["head_offset_cm"]
     (tmp_path / "app_settings.json").write_text(json.dumps({"head_offset_cm": 3}))
     assert e._load_settings()["head_offset_cm"] == 3
