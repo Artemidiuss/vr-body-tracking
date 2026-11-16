@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FBT — Записи</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="screen rp">
+    <header class="top">
+      <a href="/" class="icon-btn rp-back" aria-label="Назад">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+      </a>
+      <div class="brand">ЗАПИСИ</div>
+      <div id="games" class="chips"></div>
+    </header>
+    <main class="rp-stage">
+      <canvas id="view"></canvas>
+      <div id="clock" class="rp-clock"></div>
+      <div id="msg" class="rp-msg"></div>
+      <div class="render-hint">тягни, щоб покрутити · колесо — ближче</div>
+    </main>
+    <footer class="rp-bar">
+      <button id="play" class="rp-play" aria-label="Грати">
+        <svg id="icPlay" viewBox="0 0 24 24" width="26" height="26"><path d="M8 5v14l11-7z" fill="currentColor"/></svg>
+        <svg id="icPause" class="hidden" viewBox="0 0 24 24" width="26" height="26"><path d="M7 5h4v14H7zM13 5h4v14h-4z" fill="currentColor"/></svg>
+      </button>
+      <canvas id="line" class="rp-line" aria-label="Час запису"></canvas>
+      <div id="time" class="rp-time">0:00 / 0:00</div>
+      <button id="speed" class="rp-speed" title="Швидкість">1×</button>
+    </footer>
+  </div>
+  <script src="/replay.js"></script>
+</body>
+</html>

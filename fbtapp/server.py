@@ -22,6 +22,8 @@ import numpy as np
 from fbt.engine import Engine
 from fbt.skeleton import BONE_IDX, BONES, HALPE26
 
+from . import replay
+
 UI = os.path.join(os.path.dirname(__file__), "ui")
 TYPES = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml"}
@@ -76,7 +78,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         try:
-            if path in ("/", "/index.html", "/app.js", "/style.css"):
+            if path in ("/", "/index.html", "/app.js", "/style.css", "/replay", "/replay.html", "/replay.js"):
+                path = "/replay.html" if path == "/replay" else path
                 name = "index.html" if path == "/" else path[1:]
                 with open(os.path.join(UI, name), "rb") as fh:
                     self._send(200, fh.read(), TYPES[os.path.splitext(name)[1]])
@@ -86,6 +89,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(ENGINE.snapshot())
             elif path == "/api/meta":
                 self._json({"bones": BONE_IDX, "names": HALPE26})
+            elif path == "/api/sessions":
+                self._json(replay.list_sessions(ENGINE.d))
+            elif path.startswith("/api/replay/"):
+                self._replay(path.split("/")[3])
             elif path == "/events":
                 self._events()
             elif path.startswith("/video/"):
@@ -94,6 +101,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(404, b"not found", "text/plain")
         except (BrokenPipeError, ConnectionResetError):
             pass
+
+    def _replay(self, name: str):
+        try:
+            p = replay.build(ENGINE.d, name)
+        except (ValueError, OSError) as e:
+            self._send(404, str(e).encode(), "text/plain")
+            return
+        with open(p, "rb") as fh:
+            self._send(200, fh.read(), "application/octet-stream")
 
     def _events(self):
         self.send_response(200)
@@ -151,6 +167,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/calibrate/dismiss": lambda: (e.dismiss_calibration(), {"ok": True})[1],
             "/api/server/start": e.start_server,
             "/api/server/stop": e.stop_server,
+            "/api/sleep": e.sleep,
+            "/api/wake": e.wake,
         }
         try:
             if path in routes:

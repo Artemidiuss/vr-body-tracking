@@ -40,6 +40,7 @@ DEFAULTS = {
     "voice_alerts": True,
     "calib_seconds": 30,
     "keep_logs": 5,
+    "auto_sleep": True,          # setup screen: cameras off after AUTO_SLEEP_S with nobody in front of them
     # Trackers (hip and feet are always on)
     "hmd_anchor": True,          # with the headset pose: trackers in VRChat space, head = real headset
     "track_chest": True,
@@ -55,6 +56,8 @@ DEFAULTS = {
     "yaw_trim": 0,               # degrees added to the one-shot yaw alignment
     "extra_fps": 10,             # pose rate of the Mac camera (heat: see ARCHITECTURE.md §19)
 }
+AUTO_SLEEP_S = 300
+BUSY_CALIB = ("countdown", "recording", "computing")
 TUNABLE = {"hmd_anchor", "smooth_hz", "predict_ms", "head_offset_cm", "head_predict_ms", "head_smooth_hz", "yaw_trim",
            "extra_fps", "track_chest", "track_knees", "track_elbows", "foot_flat"}
 
@@ -598,6 +601,8 @@ class Engine:
         self.thermal: int | None = None
         self.mac_battery: dict | None = None
         self.server_t0: float | None = None
+        self.setup_since = time.perf_counter()     # for the auto-sleep: a fresh setup screen gets the full wait
+        self.slept_auto = False
         self._caffeinate = None
         self._statsf = None
         self._quit = threading.Event()
@@ -669,13 +674,13 @@ class Engine:
         self._reset_3d = True
 
     def update_settings(self, new: dict) -> dict:
-        allowed = {"height_m", "quest_ip", "cameras", "use_mac", "voice_alerts", "calib_seconds"} | TUNABLE
+        allowed = {"height_m", "quest_ip", "cameras", "use_mac", "voice_alerts", "calib_seconds", "auto_sleep"} | TUNABLE
         old_cams = list(self.settings["cameras"])
         for k, v in new.items():
             if k in allowed:
                 self.settings[k] = v
         self.save_settings()
-        if list(self.settings["cameras"]) != old_cams:
+        if list(self.settings["cameras"]) != old_cams and self.mode != "sleep":
             self._make_slots()
         for sl in self.slots[2:]:
             sl.max_rate = float(self.settings["extra_fps"])
@@ -775,6 +780,8 @@ class Engine:
 
     # ---------------- server mode
     def start_server(self) -> dict:
+        if self.mode == "sleep":
+            return {"error": "Спершу увімкни камери"}
         if len(self.cams) < 2:
             return {"error": "Спочатку відкалібруй камери"}
         if self.calib["state"] in ("countdown", "recording", "computing"):
@@ -786,6 +793,8 @@ class Engine:
                                      f"{self.d}/logs/session_{stamp}.jsonl", align=self.align, hmd=self.hmd)
             self._statsf = open(f"{self.d}/logs/session_{stamp}.log", "w")
             self.hmd.logf = open(f"{self.d}/logs/session_{stamp}_hmd.jsonl", "w")
+            if os.path.exists(self.calib_path):        # where the cameras were, for the replay page
+                shutil.copy(self.calib_path, f"{self.d}/logs/session_{stamp}_calib.json")
             self.stab = self._new_stab()      # learn bone lengths fresh, standing in the play area
             self.mode, self.server_t0 = "server", time.perf_counter()
         try:   # keep the display awake while the server runs
@@ -796,7 +805,8 @@ class Engine:
 
     def stop_server(self) -> dict:
         with self.lock:
-            self.mode = "setup"
+            if self.mode == "server":
+                self.mode, self.setup_since = "setup", time.perf_counter()
             if self.out:
                 self.out.close()
             self.out, self.stab, self.server_t0 = None, None, None
@@ -811,10 +821,43 @@ class Engine:
             self._caffeinate = None
         return {"ok": True}
 
+    # ---------------- sleep: no cameras, no pose models, nothing on the GPU
+    def sleep(self, auto: bool = False) -> dict:
+        """Disconnect every camera (the phones stop sending, the Mac camera turns off) and stop
+        all pose work: the app stays open and costs next to nothing. wake() brings it back."""
+        with self.lock:
+            if self.mode == "server":
+                return {"error": "Спершу зупини гру"}
+            if self.calib["state"] in BUSY_CALIB:
+                return {"error": "Зачекай, йде калібрування"}
+            if self.mode == "sleep":
+                return {"ok": True}
+            slots, self.slots = self.slots, []
+            self.mode, self.slept_auto = "sleep", auto
+            self.skeleton = self.skeleton_valid = None
+        for sl in slots:
+            sl.stop()
+        return {"ok": True}
+
+    def wake(self) -> dict:
+        with self.lock:
+            if self.mode != "sleep":
+                return {"ok": True}
+            self._make_slots()
+            self.mode, self.setup_since, self.slept_auto = "setup", time.perf_counter(), False
+        return {"ok": True}
+
+    def _maybe_auto_sleep(self, now: float):
+        if self.mode != "setup" or not self.settings.get("auto_sleep", True) or self.calib["state"] in BUSY_CALIB:
+            return
+        seen = max([self.setup_since] + [s.person_t for s in self.slots])
+        if now - seen > AUTO_SLEEP_S:
+            self.sleep(auto=True)
+
     def _rotate_logs(self):
         files = sorted(p for p in glob.glob(f"{self.d}/logs/session_*.jsonl") if not p.endswith("_hmd.jsonl"))
         for p in files[:max(0, len(files) - int(self.settings["keep_logs"]) + 1)]:
-            for q in (p, p[:-6] + ".log", p[:-6] + "_hmd.jsonl"):
+            for q in (p, p[:-6] + ".log", p[:-6] + "_hmd.jsonl", p[:-6] + "_calib.json", p[:-6] + ".replay"):
                 try:
                     os.remove(q)
                 except OSError:
@@ -829,6 +872,7 @@ class Engine:
         while not self._quit.is_set():
             time.sleep(1.0)
             now = time.perf_counter()
+            self._maybe_auto_sleep(now)
             for s in self.slots:
                 p = prev.get(id(s))
                 if p is not None:
@@ -917,6 +961,8 @@ class Engine:
     def start_calibration(self) -> dict:
         if self.calib["state"] in ("countdown", "recording", "computing"):
             return {"error": "Калібрування вже йде"}
+        if self.mode == "sleep":
+            return {"error": "Спершу увімкни камери"}
         if self.mode != "setup":
             return {"error": "Спочатку зупини гру"}
         off = [self.cam_name(s) for s in self.slots[:2] if not s.online]
@@ -1064,7 +1110,7 @@ class Engine:
             })
         out = self.out
         snap = {
-            "mode": self.mode, "cams": cams, "headset": self.headset_online, "thermal": self.thermal,
+            "mode": self.mode, "slept_auto": self.slept_auto, "cams": cams, "headset": self.headset_online, "thermal": self.thermal,
             "hmd": {"ok": self.hmd.fresh, "rate": round(self.hmd.rate), "queries": self.hmd.queries,
                     "datagrams": self.hmd.datagrams},
             "mac_battery": self.mac_battery,
@@ -1083,7 +1129,7 @@ class Engine:
                 "align_ready": bool(self.align.ready),
                 "align_lost": bool(self.align.lost),
             },
-            "settings": {k: self.settings[k] for k in ("height_m", "quest_ip", "cameras", "use_mac", "voice_alerts", *TUNABLE)},
+            "settings": {k: self.settings[k] for k in ("height_m", "quest_ip", "cameras", "use_mac", "voice_alerts", "auto_sleep", *TUNABLE)},
             "defaults": {k: DEFAULTS[k] for k in TUNABLE},
         }
         if with_skeleton:

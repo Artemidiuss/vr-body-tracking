@@ -145,3 +145,36 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
 
 .toast { position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--line);
   padding: 12px 18px; border-radius: 12px; font-size: 15px; z-index: 20; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+
+/* ---------- replays ---------- */
+.rec-btn { background: none; border: 0; font: inherit; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; color: var(--muted); text-decoration: none; font-size: 14px;
+  padding: 6px 10px; border-radius: 8px; }
+.rec-btn:hover { color: var(--text); background: var(--panel); }
+.rp-back { display: inline-flex; }
+.chip.game { cursor: pointer; color: var(--text); font: inherit; font-size: 13px; }
+.chip.game:hover { border-color: #3a414c; }
+.chip.game.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--panel)); }
+.rp-stage { flex: 1; min-height: 0; position: relative; margin: 0 18px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+#view { width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+#view:active { cursor: grabbing; }
+.rp-clock { position: absolute; left: 16px; top: 12px; font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--text); opacity: .85; pointer-events: none; }
+.rp-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; text-align: center; color: var(--muted); font-size: 16px; pointer-events: none; }
+.rp-msg small { font-size: 13px; }
+.rp-bar { display: flex; align-items: center; gap: 14px; padding: 14px 18px 18px; }
+.rp-play { flex: none; width: 52px; height: 52px; border-radius: 50%; border: 0; background: var(--accent); color: var(--accent-ink);
+  display: flex; align-items: center; justify-content: center; cursor: pointer; }
+.rp-play:hover { filter: brightness(1.08); }
+.rp-line { flex: 1; min-width: 0; height: 44px; cursor: pointer; touch-action: none; }
+.rp-time { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; font-size: 14px; min-width: 110px; text-align: right; }
+.rp-speed { flex: none; min-width: 48px; height: 34px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel);
+  color: var(--text); font: inherit; font-weight: 600; cursor: pointer; }
+.rp-speed:hover { border-color: #3a414c; }
+
+/* ---------- sleep ---------- */
+.sleep-main { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 30px; text-align: center; }
+.sleep-moon { color: #8fa3c7; margin-bottom: 4px; padding: 30px; border-radius: 50%; background: radial-gradient(circle, rgba(143,163,199,.16), transparent 68%); animation: breathe 5s ease-in-out infinite; }
+@keyframes breathe { 50% { opacity: .55; transform: translateY(-3px); } }
+.sleep-main h1 { margin: 0; font-size: clamp(30px, 4vw, 44px); font-weight: 700; letter-spacing: -.01em; }
+.sleep-main p { margin: 0; color: var(--muted); font-size: clamp(16px, 1.7vw, 20px); max-width: 520px; }
+.sleep-btn { flex: none; margin-top: 18px; font-size: 20px; padding: 18px 34px; min-width: 280px; }
+.sleep-foot { display: flex; justify-content: center; padding: 0 0 22px; }

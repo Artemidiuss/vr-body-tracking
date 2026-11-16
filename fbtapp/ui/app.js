@@ -66,10 +66,20 @@ function offlineHelp(c) {
 // ---------------------------------------------------------------- render
 function render() {
   if (!S) return;
-  const game = S.mode === "server";
-  $("#setup").classList.toggle("hidden", game);
+  const game = S.mode === "server", asleep = S.mode === "sleep";
+  $("#setup").classList.toggle("hidden", game || asleep);
   $("#game").classList.toggle("hidden", !game);
-  if (S.mode !== lastMode) { tilesKey = ""; panelKey = ""; lastMode = S.mode; }
+  $("#sleep").classList.toggle("hidden", !asleep);
+  if (S.mode !== lastMode) {
+    tilesKey = ""; panelKey = ""; lastMode = S.mode;
+    if (asleep) { const b = $("#wakeBtn"); b.disabled = false; b.textContent = "Увімкнути камери"; b.focus(); }
+  }
+  if (asleep) {
+    $("#sleepWhy").textContent = S.slept_auto
+      ? "5 хвилин перед камерами нікого не було, тож я їх вимкнув. MacBook відпочиває."
+      : "MacBook відпочиває, програма лишається відкритою.";
+    return;
+  }
   order = camOrder(S);
   if (game) renderGame(); else renderSetup();
 }
@@ -238,6 +248,8 @@ function renderGame() {
   if ($("#gInfo").innerHTML !== info) $("#gInfo").innerHTML = info;
 }
 $("#btnStop").onclick = () => post("/api/server/stop");
+$("#sleepBtn").onclick = () => post("/api/sleep");
+$("#wakeBtn").onclick = () => { const b = $("#wakeBtn"); b.disabled = true; b.textContent = "Вмикаю…"; post("/api/wake"); };
 
 // ---------------------------------------------------------------- 3D view
 const cv = $("#render"), ctx = cv.getContext("2d");
@@ -321,7 +333,7 @@ const SLIDERS = [
   ["yaw_trim", "Поправка повороту", "якщо тіло в грі трохи розвернуте", -30, 30, 1, "°"],
   ["extra_fps", "Частота камери MacBook", "більше — точніше, але Mac сильніше гріється", 5, 30, 5, "к/с"],
 ];
-const CHECKS = ["hmd_anchor", "track_chest", "track_knees", "track_elbows", "foot_flat", "use_mac", "voice_alerts"];
+const CHECKS = ["hmd_anchor", "track_chest", "track_knees", "track_elbows", "foot_flat", "use_mac", "auto_sleep", "voice_alerts"];
 $("#sliders").innerHTML = SLIDERS.map(([k, t, hint, mn, mx, st, u]) => `
   <div class="slider" data-k="${k}">
     <div class="t"><b>${t}</b><div class="num"><input type="number" min="${mn}" max="${mx}" step="${st}" aria-label="${t}, ${u}"><small>${u}</small></div></div>
