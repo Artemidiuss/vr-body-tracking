@@ -138,9 +138,9 @@ class StreamServer(
                             val pl = ByteBuffer.allocate(8).putLong(now).array()
                             // pongs bypass the frame queue
                             synchronized(out) { writeRaw(Packet(Proto.PONG, 0, 0, ts, pl)) }
-                            // Battery / heat for the Mac's status screen: on the first ping, then every ~5 s.
+                            // Battery, heat and gravity: on every ping (once a second), a few dozen bytes.
                             val t = SystemClock.elapsedRealtime()
-                            if (t - lastStatus > 5000) {
+                            if (t - lastStatus > 900) {
                                 lastStatus = t
                                 val st = try { status() } catch (e: Exception) { ByteArray(0) }
                                 if (st.isNotEmpty()) synchronized(out) { writeRaw(Packet(Proto.STATUS, 0, 0, 0, st)) }

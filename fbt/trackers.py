@@ -188,12 +188,17 @@ def solve(P_world: np.ndarray, enabled=("hip", "chest", "left_foot", "right_foot
     return out
 
 
-def is_tpose(P_world: np.ndarray) -> bool:
-    """Arms stretched sideways at shoulder height (VRChat's calibration pose):
-    wrists at least 85% of the full arm span apart (the span measured on this
-    same skeleton, so it does not depend on body proportions) and level with
-    the shoulders."""
+def is_tpose(P_world: np.ndarray, max_tilt_deg: float = 30.0) -> bool:
+    """Arms stretched sideways at shoulder height (VRChat's calibration pose), standing
+    or sitting upright: wrists at least 85% of the full arm span apart (the span measured
+    on this same skeleton, so it does not depend on body proportions), level with the
+    shoulders, and the torso within 30 deg of vertical. Lying on the floor with the arms
+    spread is not one: there the torso is ~90 deg off (a T-pose standing: 3-8 deg), and
+    taking it re-aligned the trackers to a wrong facing (ARCHITECTURE.md §27)."""
     g = lambda n: P_world[IDX[n]]
+    spine = g("neck") - g("hip")
+    if spine[1] < np.cos(np.radians(max_tilt_deg)) * np.linalg.norm(spine):
+        return False
     sh = np.linalg.norm(g("left_shoulder") - g("right_shoulder"))
     arms = sum(np.linalg.norm(g(f"{s}_shoulder") - g(f"{s}_elbow")) + np.linalg.norm(g(f"{s}_elbow") - g(f"{s}_wrist"))
                for s in ("left", "right"))
@@ -201,13 +206,6 @@ def is_tpose(P_world: np.ndarray) -> bool:
     level = max(abs(g("left_wrist")[1] - g("left_shoulder")[1]),
                 abs(g("right_wrist")[1] - g("right_shoulder")[1]))
     return span > 0.85 * (sh + arms) and level < 0.15
-
-
-def is_hands_up(P_world: np.ndarray) -> bool:
-    """Both wrists clearly above the head: an easy, in-frame alignment gesture."""
-    g = lambda n: P_world[IDX[n]]
-    top = g("head")[1]
-    return g("left_wrist")[1] > top + 0.05 and g("right_wrist")[1] > top + 0.05
 
 
 def head_tracker(P_world: np.ndarray, source: str = "ears", forward: float = 0.0) -> Tracker:

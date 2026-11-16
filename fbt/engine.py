@@ -20,14 +20,14 @@ import time
 import cv2
 import numpy as np
 
-from .calibrate import (PoseTrack, calibrate_extra, calibrate_pair, load_calibration, save_calibration,
+from .calibrate import (PoseTrack, calibrate_extra, calibrate_pair, merge_gravity, load_calibration, save_calibration,
                         triangulate_tracks)
 from .filters import MotionPredictor, OneEuro, SkeletonFit, SkeletonStabilizer
 from .maccam import mac_focal_range, open_source
 from .osc_out import VRChatSender
 from .pose import Pose2D, make_backend
 from .skeleton import IDX
-from .trackers import head_tracker, is_hands_up, is_tpose, solve, to_unity
+from .trackers import head_tracker, is_tpose, solve, to_unity
 from .triangulate import triangulate_with_swap_check, view_thresholds, view_weights
 
 CORE = [IDX[k] for k in ("hip", "left_hip", "right_hip", "neck")]
@@ -472,8 +472,9 @@ class TrackerOutput:
             self.head_dir = hd if self.head_dir is None else self.head_dir * 0.8 + hd * 0.2
         if self.head_dir is not None and np.linalg.norm(self.head_dir) > 1e-6:
             pos = pos + float(st["head_offset_cm"]) / 100 * self.head_dir / np.linalg.norm(self.head_dir)
-        # One yaw message after hands up / T-pose held 1 s (averaged body facing).
-        tp = is_hands_up(S) or is_tpose(S)
+        # One yaw message after a T-pose held 1 s (averaged body facing). Only the T-pose:
+        # "hands up" also fired lying on the floor with the arms over the head (§27).
+        tp = is_tpose(S)
         self.tpose_since = (self.tpose_since or now) if tp else None
         if tp:
             self.facing.append(hp.rotation[1])
@@ -955,10 +956,15 @@ class Engine:
             t_end = time.time() + seconds
             self.calib = {"state": "recording", "t_end": t_end, "seconds": seconds}
 
+            gravity = {s.index: [] for s in self.slots[:2]}     # phone accelerometer readings
+
             def phones_ok():
                 for s in self.slots[:2]:
                     if not s.online:
                         raise RuntimeError(f"{self.cam_name(s)} відключився під час запису")
+                    g = s.status().get("gravity")
+                    if g and (not gravity[s.index] or gravity[s.index][-1] is not g):
+                        gravity[s.index].append(g)
             self._wait_until(t_end, phones_ok)
             data = {s.index: (s.rec, s.rec_size) for s in slots}
             for s in slots:
@@ -968,7 +974,10 @@ class Engine:
             for r in recorders:
                 r.join(timeout=5)
             self.calib = {"state": "computing"}
-            info = {f"cam{r.slot.index}": r.info for r in recorders}
+            info = {f"cam{r.slot.index}": dict(r.info) for r in recorders}
+            for i, gs in gravity.items():
+                if gs and f"cam{i}" in info:
+                    info[f"cam{i}"]["gravity"] = merge_gravity(gs)
             with open(f"{out_dir}/info.json", "w") as fh:
                 json.dump(info, fh, indent=2)
             tracks = {}

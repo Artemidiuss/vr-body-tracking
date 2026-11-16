@@ -6,7 +6,7 @@ q_root: our head root from the cameras (ear midpoint, 4 cm down the spine);
 d: the headset point relative to that root, in the headset's own frame (eyes are
 ~6 cm above and ~8 cm in front of it, measured).
 
-A T-pose (or hands up) sets it at once (reset_from_pose); a background fit over
+A T-pose sets it at once (reset_from_pose); a background fit over
 the last ~40 s of pairs, taken only while the headset moves with our head,
 refines it slowly. With it the trackers are sent already in VRChat space and the
 head anchor is the real headset: on our recordings the feet standing on the floor
@@ -145,7 +145,7 @@ class HmdAlign:
 
     # ---------------- reset from a T-pose
     def reset_from_pose(self, q_root, facing_yaw_deg: float, p_hmd, euler_hmd) -> None:
-        """The player holds a T-pose / hands up, looking straight ahead: the body facing from
+        """The player holds a T-pose, looking straight ahead: the body facing from
         our cameras and the headset yaw are the same direction. That fixes the yaw at once;
         the offset follows from the head. The background fit then only refines it. A manual
         reset for whatever the automatic fit got wrong (it used to be the yaw alignment)."""

@@ -60,3 +60,62 @@ def test_extra_camera_placed_from_phone_skeleton():
     assert abs(est.K[0, 0] - mac.K[0, 0]) / mac.K[0, 0] < 0.05
     assert abs(meta["time_offset_s"] - 0.04) <= 0.011
     assert meta["reproj_median_px"] < 15   # noise model: ~9 px sigma from behind
+
+
+def test_upright_direction_ignores_leaning_frames():
+    """Crouches and leans to one side must not tilt 'up': it is the standing-straight direction."""
+    from fbt.calibrate import upright_direction
+    from fbt.skeleton import IDX, NUM_KEYPOINTS
+    rng = np.random.default_rng(0)
+    n_up, n_lean = 600, 400
+    tilt = np.r_[rng.normal(0, 2, n_up), rng.normal(25, 5, n_lean)]      # degrees, towards +x
+    a = np.radians(tilt)
+    skel = np.full((len(a), NUM_KEYPOINTS, 3), np.nan)
+    skel[:, IDX["left_ankle"]] = [-0.1, 0, 0]
+    skel[:, IDX["right_ankle"]] = [0.1, 0, 0]
+    skel[:, IDX["neck"]] = np.c_[1.4 * np.sin(a), 1.4 * np.cos(a), np.zeros(len(a))]
+    up = upright_direction(skel)
+    assert np.degrees(np.arccos(up[1])) < 1.0
+
+
+def _with_gravity(track, cam, world_up=(0.0, 1.0, 0.0)):
+    """FBT Cam metadata for a portrait phone whose frames the Mac rotated: sensor size swapped,
+    and the accelerometer reading (device axes) that this camera pose gives."""
+    u = cam.R @ np.asarray(world_up, float)             # up in camera axes (x right, y down, z fwd)
+    g = 9.81 * np.array([u[0], -u[1], -u[2]])           # device axes: X = x, Y = -y, Z = -z
+    track.info = {**track.info, "sensor_orientation": 90, "width": track.height, "height": track.width,
+                  "gravity": {"v": g.tolist(), "sd_deg": 0.1, "n": 30}}
+    return track
+
+
+def test_gravity_mapping_portrait_phone():
+    from fbt.calibrate import gravity_up_in_camera
+    t = PoseTrack(np.zeros(1), np.zeros((1, 26, 2)), np.zeros((1, 26)), 480, 640,
+                  {"sensor_orientation": 90, "width": 640, "height": 480,
+                   "gravity": {"v": [0.0, 9.81, 0.0], "sd_deg": 0.1}})
+    assert np.allclose(gravity_up_in_camera(t), [0, -1, 0])          # upright: image up
+    t.info["gravity"] = {"v": [0.0, 0.0, 9.81], "sd_deg": 0.1}       # lying face up: lens looks down
+    assert np.allclose(gravity_up_in_camera(t), [0, 0, -1])
+    t.info["gravity"]["sd_deg"] = 2.0                                # phone was moving
+    assert gravity_up_in_camera(t) is None
+
+
+def test_vertical_follows_the_phones_accelerometers():
+    """With gravity from both phones the world's up is the measured one, not the posture's:
+    tilt the 'true' vertical by 3 deg and the calibration must follow it."""
+    cams = ring_of_cameras([-40, 40], distance=1.2, vfov_deg=96)
+    f_px = cams[0].K[0, 0]
+    frames = [(t, J) for t, J, _ in motion_sequence(["walk", "squat", "side_step", "kick"], seconds_each=3)]
+    noise = NoiseModel(pixel_sigma=2.0, lr_swap_front=0, lr_swap_back=0, dropout=0.02, seed=1)
+    fmm = f_px * 3.67 / 1280
+    for tilt in (0.0, 3.0):
+        a_ = np.radians(tilt)
+        up = (np.sin(a_), np.cos(a_), 0.0)
+        a = _with_gravity(_track(cams[0], frames, noise, 3.67, fmm), cams[0], up)
+        b = _with_gravity(_track(cams[1], frames, noise, 3.67, fmm), cams[1], up)
+        est, meta = calibrate_pair(a, b, height_m=1.75, log=lambda *_: None)
+        assert meta["up"]["source"] == "phones"
+        for e, c in zip(est, cams):
+            want = c.R @ np.asarray(up)                 # measured vertical, in camera axes
+            got = e.R @ np.array([0.0, 1.0, 0.0])       # calibrated world up, in camera axes
+            assert np.degrees(np.arccos(np.clip(want @ got, -1, 1))) < 0.3

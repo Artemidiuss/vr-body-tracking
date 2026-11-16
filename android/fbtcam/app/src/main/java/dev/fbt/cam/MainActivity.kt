@@ -48,6 +48,7 @@ class MainActivity : Activity() {
     private val ui = Handler(Looper.getMainLooper())
     private val logLines = ArrayDeque<String>()
     private val prefs by lazy { getSharedPreferences("fbtcam", MODE_PRIVATE) }
+    private val gravity by lazy { GravityMeter(this) }
     private var lastFrames = 0L
     private var lastBytes = 0L
     private var lastEnc = 0L
@@ -55,6 +56,7 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        gravity.start()
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(Color.BLACK)
@@ -155,7 +157,7 @@ class MainActivity : Activity() {
             status = ::statusJson).also { it.start() }
     }
 
-    /** Battery and heat, sent to the Mac (STATUS packet) for its status screen. */
+    /** Battery and heat for the Mac's status screen, and gravity for its calibration (STATUS packet). */
     private fun statusJson(): ByteArray {
         val b = applicationContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
             ?: return ByteArray(0)
@@ -172,6 +174,7 @@ class MainActivity : Activity() {
             put("plugged", b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0)
             put("temp_c", tempC)
             put("thermal", thermal)
+            gravity.json()?.let { put("gravity", it) }
         }.toString().toByteArray()
     }
 
@@ -258,6 +261,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        gravity.stop()
         streamer?.stop()
         server?.stop()
         ui.removeCallbacks(statsTick)

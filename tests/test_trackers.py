@@ -111,14 +111,23 @@ def test_tpose_detector():
     assert is_tpose(T)
 
 
-def test_hands_up_detector():
-    from fbt.trackers import is_hands_up
+def test_tpose_not_taken_lying_down():
+    """Lying on the floor with the arms spread: wrists wide apart and level with the
+    shoulders, but it must not re-align the trackers."""
+    from fbt.trackers import is_tpose
     J = skeleton_from_state(BodyState())
-    assert not is_hands_up(J)
-    U = J.copy()
-    for side in ("left", "right"):
-        U[IDX[f"{side}_wrist"]] = J[IDX["head"]] + [0.1 if side == "left" else -0.1, 0.25, 0]
-    assert is_hands_up(U)
+    T = J.copy()
+    for side, sgn in (("left", 1), ("right", -1)):
+        sh = J[IDX[f"{side}_shoulder"]]
+        T[IDX[f"{side}_elbow"]] = sh + [sgn * 0.29, 0, 0]
+        T[IDX[f"{side}_wrist"]] = sh + [sgn * 0.55, 0, 0]
+    c, s_ = 0.0, 1.0                                   # rotate 90 deg about x: lying on the back
+    R = np.array([[1, 0, 0], [0, c, -s_], [0, s_, c]])
+    L = (T - T[IDX["hip"]]) @ R.T + [0, 0.15, 0]
+    assert is_tpose(T) and not is_tpose(L)
+    a = np.radians(20)                                 # leaning back a little, sitting: still counts
+    R = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+    assert is_tpose((T - T[IDX["hip"]]) @ R.T + T[IDX["hip"]])
 
 
 def test_exact_foot_mode_transmits_pointed_toes():

@@ -112,6 +112,97 @@ def _proj(K, R, t, X):
     return (Xc[:, :2] / Xc[:, 2:3]) * K[0, 0] + K[:2, 2]
 
 
+def upright_direction(skel: np.ndarray, cone_deg: float = 12.0) -> np.ndarray:
+    """'Up' for the world frame: the ankle-midpoint -> neck direction while standing straight.
+
+    The median over the whole recording mixes in crouches, leans and reaches: one calibration
+    came out 3.5 deg off the upright frames that way, so in VRChat the feet sat ~8 cm to one
+    side of a player standing straight (ARCHITECTURE.md §26). Starting from that median, keep
+    only the frames within a narrow cone of it and take their median, a few times over."""
+    ank = np.nanmean(skel[:, [IDX["left_ankle"], IDX["right_ankle"]]], axis=1)
+    torso = skel[:, IDX["neck"]] - ank
+    torso = torso[np.isfinite(torso).all(1)]
+    u = torso / np.linalg.norm(torso, axis=1, keepdims=True)
+    up = np.median(u, axis=0)
+    up /= np.linalg.norm(up)
+    for _ in range(4):
+        sel = u @ up > np.cos(np.radians(cone_deg))
+        if sel.sum() < max(30, 0.2 * len(u)):
+            break
+        up = np.median(u[sel], axis=0)
+        up /= np.linalg.norm(up)
+    return up
+
+
+def gravity_up_in_camera(track: PoseTrack) -> np.ndarray | None:
+    """'Up' in this camera's frame (x right, y down, z forward in the image as calibrated),
+    from the phone's accelerometer (FBT Cam STATUS 'gravity', stored in info['gravity']).
+
+    Android reports gravity as an upward vector in device axes (X right, Y up, Z out of
+    the screen, portrait). The Mac rotates a back camera's frames by sensor_orientation,
+    which puts them in that same portrait orientation: image x = X, image y = -Y, and the
+    lens looks along -Z. None when there is no reading, the phone was not still, or the
+    frames are not in that orientation."""
+    g = track.info.get("gravity") or {}
+    v = g.get("v")
+    rot = track.info.get("sensor_orientation")
+    w0, h0 = track.info.get("width"), track.info.get("height")
+    if v is None or g.get("sd_deg", 99) > 0.5 or rot not in (90, 270):
+        return None
+    if not (w0 and h0 and (track.width, track.height) == (h0, w0)):      # not the rotated frames
+        return None
+    u = np.array([v[0], -v[1], -v[2]], float)
+    n = np.linalg.norm(u)
+    return u / n if n > 1e-6 else None
+
+
+def merge_gravity(readings: list) -> dict:
+    """One gravity for the whole calibration from the phone's per-second readings (each a
+    2 s average): the mean direction, and the worst spread, so a phone that was bumped
+    (or moved) during the recording is not used."""
+    V = np.array([r["v"] for r in readings], float)
+    U = V / np.linalg.norm(V, axis=1, keepdims=True)
+    m = U.mean(0)
+    m /= np.linalg.norm(m)
+    drift = max(_angle(u, m) for u in U)
+    sd = max(float(r.get("sd_deg", 0)) for r in readings)
+    return {"v": (m * np.linalg.norm(V, axis=1).mean()).tolist(), "sd_deg": round(max(sd, drift), 3),
+            "n": len(readings)}
+
+
+def _angle(a, b) -> float:
+    return float(np.degrees(np.arccos(np.clip(np.dot(a, b), -1.0, 1.0))))
+
+
+def choose_up(posture: np.ndarray, phones: list, log=print, agree_deg: float = 3.0) -> tuple:
+    """The vertical of the world frame. The phones' accelerometers measure it physically
+    (factory calibrated; ~1-2 deg each in the worst case, mostly the camera module sitting a
+    little skewed to the accelerometer), so with both phones agreeing their mean is used.
+    The posture estimate (upright_direction) is the fallback and the cross-check.
+    phones: up vectors in the same frame as posture, None where unknown."""
+    g = [p for p in phones if p is not None]
+    info = {"posture_vs_phones_deg": None, "phones_deg": None}
+    if len(g) == 2:
+        info["phones_deg"] = round(_angle(g[0], g[1]), 2)
+        if info["phones_deg"] <= agree_deg:
+            up = g[0] + g[1]
+            up /= np.linalg.norm(up)
+            info["posture_vs_phones_deg"] = round(_angle(up, posture), 2)
+            log(f"  vertical: phones' accelerometers (they agree within {info['phones_deg']:.1f}°, "
+                f"standing posture is {info['posture_vs_phones_deg']:.1f}° off)")
+            return up, {"source": "phones", **info}
+        log(f"  vertical: phones disagree by {info['phones_deg']:.1f}°, using the standing posture")
+    elif len(g) == 1:
+        info["posture_vs_phones_deg"] = round(_angle(g[0], posture), 2)
+        if info["posture_vs_phones_deg"] <= agree_deg:
+            log(f"  vertical: one phone's accelerometer (posture {info['posture_vs_phones_deg']:.1f}° off)")
+            return g[0].copy(), {"source": "one phone", **info}
+        log(f"  vertical: one phone only and {info['posture_vs_phones_deg']:.1f}° off the posture, using the posture")
+    else:
+        log("  vertical: standing posture (no accelerometer data from the phones)")
+    return posture, {"source": "posture", **info}
+
+
 def calibrate_pair(a: PoseTrack, b: PoseTrack, height_m: float, min_score: float = 0.6,
                    max_points: int = 2500, seed: int = 0, log=print):
     pa, pb, sa, sb, ts = pair_tracks(a, b)
@@ -203,12 +294,10 @@ def calibrate_pair(a: PoseTrack, b: PoseTrack, height_m: float, min_score: float
                 skel[f, k] = triangulate_point([PA, PB], np.stack([pa[f, k], pb[f, k]]),
                                                np.array([sa[f, k], sb[f, k]]))
 
-    # Up direction: median ankle-midpoint -> neck vector.
-    ank = np.nanmean(skel[:, [IDX["left_ankle"], IDX["right_ankle"]]], axis=1)
-    torso = skel[:, IDX["neck"]] - ank
-    torso = torso[np.isfinite(torso).all(1)]
-    up = np.median(torso / np.linalg.norm(torso, axis=1, keepdims=True), axis=0)
-    up /= np.linalg.norm(up)
+    # Vertical: the phones' accelerometers (frame A coordinates: x_B = R x_A + t), checked
+    # against the standing posture.
+    gA, gB = gravity_up_in_camera(a), gravity_up_in_camera(b)
+    up, up_info = choose_up(upright_direction(skel), [gA, None if gB is None else R.T @ gB], log=log)
     # Scale from height: head top to floor along "up".
     hgt = (skel[:, IDX["head"]] @ up) - np.nanmin(skel[:, FEET] @ up, axis=1)
     hgt = hgt[np.isfinite(hgt)]
@@ -244,7 +333,7 @@ def calibrate_pair(a: PoseTrack, b: PoseTrack, height_m: float, min_score: float
     ang = np.degrees(np.arccos(np.clip(np.dot(a_dir, b_dir), -1, 1)))
     log(f"  angle between camera directions: {ang:.0f}°")
     return cams, {"reproj_median_px": float(np.median(err1)), "baseline_m": float(scale),
-                  "angle_deg": float(ang), "frames": int(len(pa)), "points": int(n)}
+                  "angle_deg": float(ang), "frames": int(len(pa)), "points": int(n), "up": up_info}
 
 
 def triangulate_tracks(cams: list[Camera], a: PoseTrack, b: PoseTrack, min_score: float = 0.4):
