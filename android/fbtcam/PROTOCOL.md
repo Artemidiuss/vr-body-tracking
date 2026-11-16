@@ -28,6 +28,7 @@ everything — video, metadata and clock sync — goes through the same socket.
 | 3 PING | Mac→phone | Mac time, ns | empty |
 | 4 PONG | phone→Mac | Mac time echoed, ns | 8 bytes: phone clock, ns (same clock as FRAME ts) |
 | 5 KEYFRAME_REQ | Mac→phone | 0 | empty |
+| 6 STATUS | phone→Mac | 0 | UTF-8 JSON: battery (%), charging, plugged, temp_c (battery), thermal (Android thermal status 0–6, −1 unknown). Sent after the first PING, then every ~5 s. Older receivers ignore it |
 
 ## Clock sync
 

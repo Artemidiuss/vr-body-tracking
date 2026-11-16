@@ -63,7 +63,10 @@ class OSCQueryReceiver:
     whatever VRChat sends. `on_message(address, args, t_received)`."""
 
     def __init__(self, name: str = "FBT-Hub", on_message=None, ip: str | None = None,
-                 towards: str = "192.168.31.1", extra_ports=(9001,)):
+                 towards: str = "192.168.31.1", extra_ports=(9001,), osc_port: int = 0, http_port: int = 0):
+        """osc_port / http_port: fixed ports (0 = any free one). VRChat keeps sending to the
+        service it started with for its whole session, so the app uses the same ports and
+        name every time: after a restart the packets land in the new process."""
         self.name = name
         self.ip = ip or local_ip(towards)
         self.on_message = on_message or (lambda *a: None)
@@ -77,7 +80,10 @@ class OSCQueryReceiver:
         # silently: our advertised port, plus VRChat's default out port 9001.
         self.socks = []
         main = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        main.bind(("0.0.0.0", 0))
+        try:
+            main.bind(("0.0.0.0", osc_port))
+        except OSError:
+            main.bind(("0.0.0.0", 0))
         self.osc_port = main.getsockname()[1]
         self.socks.append(main)
         for extra in extra_ports:
@@ -123,7 +129,10 @@ class OSCQueryReceiver:
                 pass
 
         self.http_hits: list = []
-        self.http = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
+        try:
+            self.http = ThreadingHTTPServer(("0.0.0.0", http_port), Handler)
+        except OSError:
+            self.http = ThreadingHTTPServer(("0.0.0.0", 0), Handler)
         self.http_port = self.http.server_address[1]
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
         try:  # some OSCQuery clients reuse the HTTP port number for UDP
@@ -180,3 +189,4 @@ class OSCQueryReceiver:
         for sk in self.socks:
             sk.close()
         self.http.shutdown()
+        self.http.server_close()           # free the port: the next instance binds the same one

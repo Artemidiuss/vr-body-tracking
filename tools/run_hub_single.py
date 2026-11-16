@@ -25,7 +25,7 @@ from fbt.filters import SkeletonStabilizer
 from fbt.mono3d import MediaPipeMono3D
 from fbt.osc_out import VRChatSender
 from fbt.skeleton import BONE_IDX, IDX
-from fbt.trackers import head_tracker, is_tpose, solve
+from fbt.trackers import RotationSmoother, head_tracker, is_tpose, solve
 from fbt.triangulate import LR_SWAP
 from tools.live3d import draw_views
 
@@ -66,6 +66,7 @@ def main():
     floor = None
     scale, heights = None, []   # MediaPipe skeletons are "average person" sized
     prev_P, swaps = None, 0
+    foot_state, rot_smooth = {}, RotationSmoother()
     tpose_since, last_yaw = None, -1e9
     last, n, t_fps, fps = -1, 0, time.perf_counter(), 0.0
     t_stop = time.perf_counter() + a.seconds if a.seconds else float("inf")

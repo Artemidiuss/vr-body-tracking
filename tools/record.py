@@ -2,6 +2,7 @@
 (calibration, model comparison, replay tests — ARCHITECTURE.md §9.1 level D).
 
   .venv/bin/python -m tools.record 192.168.31.81 192.168.31.28 --seconds 15
+  .venv/bin/python -m tools.record 192.168.31.81 192.168.31.28 mac   # + MacBook camera
 
 Writes data/rec_<time>/camN.mp4, camN.csv (frame index, capture time on the
 Mac clock, latency ms) and info.json (HELLO metadata per camera).
@@ -16,23 +17,35 @@ import os
 import threading
 import time
 
+import subprocess
+
 import cv2
 
-from fbt.fbtcam import FBTCamSource
+from fbt.maccam import open_source
 
 
-def record(hosts, seconds, out_dir=None, countdown=3):
+def speak(text: str):
+    """Voice cue (macOS `say`, Ukrainian voice) so the user away from the screen knows."""
+    try:
+        subprocess.Popen(["say", "-v", "Lesya", text])
+    except OSError:
+        pass
+
+
+def record(hosts, seconds, out_dir=None, countdown=3, voice=False):
     out_dir = out_dir or time.strftime("data/rec_%Y%m%d_%H%M%S")
     os.makedirs(out_dir, exist_ok=True)
-    srcs = []
-    for i, h in enumerate(hosts):
-        host, _, port = h.partition(":")
-        srcs.append(FBTCamSource(f"cam{i}", host, int(port or 5000)).start())
+    srcs = [open_source(f"cam{i}", h).start() for i, h in enumerate(hosts)]
     time.sleep(1.5)  # clock sync settles
+    if voice:
+        speak("Запис через три секунди. Рухайтесь: кроки на місці, присідання, руки вгору.")
+        time.sleep(5)
     for c in range(countdown, 0, -1):
         print(f"  start in {c}…", flush=True)
         time.sleep(1)
     print("  RECORDING", flush=True)
+    if voice:
+        speak("Почали")
 
     def work(i, s):
         writer, rows, last = None, [], -1
@@ -59,6 +72,8 @@ def record(hosts, seconds, out_dir=None, countdown=3):
     th = [threading.Thread(target=work, args=(i, s)) for i, s in enumerate(srcs)]
     [t.start() for t in th]
     [t.join() for t in th]
+    if voice:
+        speak("Готово, можна зупинитись")
     info = {s.camera_id: {**s.info, "host": s.host} for s in srcs}
     for s in srcs:
         s.stop()
@@ -73,8 +88,9 @@ def main():
     ap.add_argument("hosts", nargs="+")
     ap.add_argument("--seconds", type=float, default=15)
     ap.add_argument("--out")
+    ap.add_argument("--voice", action="store_true", help="spoken start/stop cues")
     a = ap.parse_args()
-    record(a.hosts, a.seconds, a.out)
+    record(a.hosts, a.seconds, a.out, voice=a.voice)
 
 
 if __name__ == "__main__":

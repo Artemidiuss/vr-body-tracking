@@ -2,7 +2,11 @@ package dev.fbt.cam
 
 import android.Manifest
 import android.app.Activity
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.os.BatteryManager
+import android.os.PowerManager
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.os.Build
@@ -35,6 +39,8 @@ class MainActivity : Activity() {
     private lateinit var camSpinner: Spinner
     private lateinit var modeSpinner: Spinner
     private lateinit var texture: TextureView
+    private lateinit var previewBtn: Button
+    private var showPreview = false
     private var cams: List<CamInfo> = emptyList()
     private var modes: List<StreamConfig> = emptyList()
     private var streamer: CameraStreamer? = null
@@ -57,16 +63,28 @@ class MainActivity : Activity() {
         status = TextView(this).apply { textSize = 15f; setTextColor(Color.WHITE) }
         camSpinner = Spinner(this)
         modeSpinner = Spinner(this)
-        texture = TextureView(this)
+        texture = TextureView(this).apply { visibility = View.INVISIBLE }
         val dim = Button(this).apply {
             text = "Затемнити екран"
             setOnClickListener { toggleDim() }
+        }
+        // Preview costs the camera an extra output surface (and GPU work). It is
+        // only needed while aiming the phone, so it is off by default.
+        previewBtn = Button(this).apply {
+            text = "Показати відео"
+            setOnClickListener {
+                showPreview = !showPreview
+                text = if (showPreview) "Сховати відео" else "Показати відео"
+                texture.visibility = if (showPreview) View.VISIBLE else View.INVISIBLE
+                restart()
+            }
         }
         logView = TextView(this).apply { textSize = 11f; setTextColor(Color.LTGRAY) }
         root.addView(status)
         root.addView(camSpinner)
         root.addView(modeSpinner)
         root.addView(texture, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        root.addView(previewBtn)
         root.addView(dim)
         root.addView(logView)
         setContentView(root)
@@ -100,6 +118,7 @@ class MainActivity : Activity() {
         fillModes()
         startServer()
         ui.post(statsTick)
+        restart()  // preview is off by default: start the camera without waiting for it
     }
 
     private fun listener(f: () -> Unit) = object : AdapterView.OnItemSelectedListener {
@@ -132,23 +151,53 @@ class MainActivity : Activity() {
         server = StreamServer(port,
             clockRealtime = { streamer != null && modes.getOrNull(modeSpinner.selectedItemPosition)?.cam?.timestampRealtime == true },
             onKeyframeNeeded = { streamer?.requestKeyframe() },
-            log = ::log).also { it.start() }
+            log = ::log,
+            status = ::statusJson).also { it.start() }
+    }
+
+    /** Battery and heat, sent to the Mac (STATUS packet) for its status screen. */
+    private fun statusJson(): ByteArray {
+        val b = applicationContext.registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+            ?: return ByteArray(0)
+        val level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1)
+        val scale = b.getIntExtra(BatteryManager.EXTRA_SCALE, 100).coerceAtLeast(1)
+        val st = b.getIntExtra(BatteryManager.EXTRA_STATUS, -1)
+        val charging = st == BatteryManager.BATTERY_STATUS_CHARGING || st == BatteryManager.BATTERY_STATUS_FULL
+        val tempC = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) / 10.0
+        val thermal = if (Build.VERSION.SDK_INT >= 29)
+            (getSystemService(POWER_SERVICE) as PowerManager).currentThermalStatus else -1
+        return JSONObject().apply {
+            put("battery", if (level >= 0) level * 100 / scale else -1)
+            put("charging", charging)
+            put("plugged", b.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) != 0)
+            put("temp_c", tempC)
+            put("thermal", thermal)
+        }.toString().toByteArray()
     }
 
     private fun restart() {
-        if (!texture.isAvailable || modes.isEmpty()) return
+        if (modes.isEmpty()) return
+        if (showPreview && !texture.isAvailable) return  // wait for the preview surface
         streamer?.stop()
-        val cfg = modes[modeSpinner.selectedItemPosition]
+        val base = modes[modeSpinner.selectedItemPosition]
+        // Latency experiments via `am start --ez template_preview false --ez oprate_max false`
+        val cfg = base.copy(
+            previewTemplate = intent?.getBooleanExtra("template_preview", prefs.getBoolean("template_preview", true)) ?: true,
+            maxOperatingRate = intent?.getBooleanExtra("oprate_max", prefs.getBoolean("oprate_max", true)) ?: true,
+            exposureCompSteps = intent?.getIntExtra("ev", prefs.getInt("ev", 0)) ?: 0)
+        prefs.edit().putInt("ev", cfg.exposureCompSteps).apply()
+        prefs.edit().putBoolean("template_preview", cfg.previewTemplate).putBoolean("oprate_max", cfg.maxOperatingRate).apply()
         prefs.edit().putString("cam", cfg.cam.id).putString("mode_${cfg.cam.id}", modeKey(cfg)).apply()
-        val st = texture.surfaceTexture!!.apply { setDefaultBufferSize(cfg.width, cfg.height) }
+        val st = if (showPreview) texture.surfaceTexture?.apply { setDefaultBufferSize(cfg.width, cfg.height) } else null
         server?.config = null
         server?.resetClockDetection()
         server?.hello = helloJson(cfg).toByteArray()
-        val noPreview = intent?.getBooleanExtra("nopreview", false) == true
-        streamer = CameraStreamer(this, cfg, if (noPreview) null else Surface(st),
+        val noPreview = !showPreview || intent?.getBooleanExtra("nopreview", false) == true
+        streamer = CameraStreamer(this, cfg, if (noPreview || st == null) null else Surface(st),
             onConfig = { server?.config = it },
             onFrame = { d, pts, key -> server?.sendFrame(d, pts, key) },
             log = ::log).also {
+            it.clockNs = { server?.phoneClockNs() ?: System.nanoTime() }
             try { it.start() } catch (e: Exception) { log("не вдалося запустити: $e") }
         }
     }
@@ -175,11 +224,12 @@ class MainActivity : Activity() {
                 val kbps = (s.sentBytes - lastBytes) * 8 / 1000
                 lastFrames = s.sentFrames; lastBytes = s.sentBytes
                 val enc = st?.encodedFrames ?: 0
-                android.util.Log.i("FBTCAM", "stats encoded/s=${enc - lastEnc} sent/s=$fps kbps=$kbps dropped=${s.dropped}")
+                android.util.Log.i("FBTCAM", "stats encoded/s=${enc - lastEnc} sent/s=$fps kbps=$kbps dropped=${s.dropped} capture->encoded=${st?.medianEncodeLatencyMs()?.let { "%.0f".format(it) } ?: "-"}ms")
                 lastEnc = enc
                 status.text = "${ips().joinToString { "$it:$port" }}\n" +
                     (if (s.connected) "● Mac підключено · $fps к/с · $kbps кбіт/с · пропущено ${s.dropped}"
-                     else "○ чекаю на Mac · закодовано ${st?.encodedFrames ?: 0}")
+                     else "○ чекаю на Mac · закодовано ${st?.encodedFrames ?: 0}") +
+                    (st?.medianEncodeLatencyMs()?.let { "\nзнімання→кодер: ${"%.0f".format(it)} мс" } ?: "")
             }
             ui.postDelayed(this, 1000)
         }

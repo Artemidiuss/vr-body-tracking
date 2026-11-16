@@ -44,7 +44,8 @@ def coreml_session(onnx_path: str, device: str = "gpu"):
         os.makedirs(MODELS_DIR, exist_ok=True)
         onnx.save(onnxslim.slim(m), fixed)
     so = ort.SessionOptions()
-    so.log_severity_level = 3
+    # 4 = fatal only: frames without a person make the CoreML EP log an error per frame.
+    so.log_severity_level = 4
     return ort.InferenceSession(fixed, sess_options=so, providers=[
         ("CoreMLExecutionProvider", {
             "ModelFormat": "MLProgram",
@@ -122,7 +123,15 @@ class RTMPoseBackend(PoseBackend):
                     old._model_path, sess_options=so, providers=["CPUExecutionProvider"])
 
     def __call__(self, image):
-        kpts, scores = self.tracker(image)
+        try:
+            kpts, scores = self.tracker(image)
+        except IndexError:
+            # rtmlib bug: with det_frequency=1 PoseTracker still runs its IoU
+            # tracker, whose id list goes out of sync when the person leaves
+            # and re-enters the frame ("pop from empty list"). Its state is
+            # unused with detection on every frame, so reset and retry once.
+            self.tracker.reset()
+            kpts, scores = self.tracker(image)
         if kpts is None or len(kpts) == 0:
             return None
         # Single-user app: take the most confident person.

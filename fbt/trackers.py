@@ -36,6 +36,14 @@ def _n(v):
     return v / n if n > 1e-9 else v
 
 
+def frame_fwd(forward, up_hint) -> np.ndarray:
+    """Like frame(), but keeps FORWARD exact (up is orthogonalised to it)."""
+    f = _n(forward)
+    u = _n(up_hint - np.dot(up_hint, f) * f)
+    r = np.cross(u, f)
+    return np.stack([r, u, f], axis=1)
+
+
 def frame(up, forward) -> np.ndarray:
     """Rotation matrix (columns right, up, forward), up kept exact."""
     u = _n(up)
@@ -52,9 +60,91 @@ def unity_euler(R: np.ndarray) -> tuple[float, float, float]:
     return float(x), float(y), float(z)
 
 
+def _yaw_of(v):
+    return np.arctan2(v[0], v[2])
+
+
+def _ang(a):
+    return (a + np.pi) % (2 * np.pi) - np.pi
+
+
+def foot_frame(heel, toe, body_fwd, prev_yaw=None, max_pitch_deg=15.0, st=None):
+    """Robust foot orientation (Unity space), built from measurements on our
+    session logs (heel/toe keypoints sometimes make the foot near-vertical,
+    pitch up to +-88 deg, so yaw becomes arbitrary -> visible 360 deg spins):
+      1. yaw candidates from the HORIZONTAL heel->toe line: a and a+180
+         (heel/toe can be swapped by the model); pick the one closer to the
+         previous frame. Near-vertical foot (<6 cm horizontal) -> keep previous.
+      2. slow sanity check vs the pelvis facing: only after ~1 s of the foot
+         pointing backwards relative to the hips do we switch candidates
+         (the pelvis direction itself glitches for single frames).
+      3. rate limit 20 deg/frame (~600 deg/s): glitches become small blips.
+      4. pitch measured along the FINAL forward direction, clamped; roll = 0.
+    st: per-foot dict (state for step 2). Returns (rotation, yaw)."""
+    f = toe - heel
+    horiz = np.array([f[0], 0.0, f[2]])
+    hl = np.linalg.norm(horiz)
+    body_yaw = _yaw_of(body_fwd)
+    ref = prev_yaw if prev_yaw is not None else body_yaw
+    if hl < 0.06:
+        yaw = ref
+    else:
+        a = _yaw_of(horiz)
+        cands = (a, _ang(a + np.pi))
+        yaw = min(cands, key=lambda c: abs(_ang(c - ref)))
+        if prev_yaw is not None and abs(_ang(yaw - prev_yaw)) > np.radians(60):
+            # Both readings are ~sideways to the last known direction: heel and
+            # toe were detected side by side (seen on the left foot in our logs).
+            # Unreliable this frame; real turns still get through gradually via
+            # the slow check below and later frames.
+            st_skip = st.get("skip", 0) + 1 if st is not None else 1
+            if st is not None:
+                st["skip"] = st_skip
+            if st_skip <= 15:
+                yaw = prev_yaw
+            elif st is not None:
+                st["skip"] = 0
+        elif st is not None:
+            st["skip"] = 0
+        if st is not None:
+            back = abs(_ang(yaw - body_yaw)) > np.radians(120)
+            st["back"] = st.get("back", 0) + 1 if back else 0
+            if st["back"] > 30:
+                yaw = cands[1] if yaw == cands[0] else cands[0]
+                st["back"] = 0
+        if prev_yaw is not None:
+            # Adaptive smoothing (One-Euro idea on the angle): the heel->toe line
+            # is short, so a few cm of keypoint noise = 15-20 deg of yaw noise.
+            # Small changes are mostly kept out, big real turns pass quickly.
+            d = _ang(yaw - prev_yaw)
+            k = min(1.0, 0.12 + abs(d) / np.radians(60))
+            d *= k
+            lim = np.radians(20)
+            if abs(d) > lim:
+                d = np.sign(d) * lim
+            yaw = _ang(prev_yaw + d)
+    u = np.array([np.sin(yaw), 0.0, np.cos(yaw)])
+    if hl >= 0.06:
+        sgn = 1.0 if np.dot(horiz, u) >= 0 else -1.0
+        pitch = float(np.clip(np.arctan2(sgn * f[1], hl), -np.radians(max_pitch_deg),
+                              np.radians(max_pitch_deg)))
+    else:
+        pitch = 0.0
+    fwd = np.array([np.sin(yaw) * np.cos(pitch), np.sin(pitch), np.cos(yaw) * np.cos(pitch)])
+    right = np.array([np.cos(yaw), 0.0, -np.sin(yaw)])
+    up = np.cross(fwd, right)                    # left-handed: up = fwd x right
+    return np.stack([right, up, fwd], axis=1), yaw
+
+
 def solve(P_world: np.ndarray, enabled=("hip", "chest", "left_foot", "right_foot",
                                         "left_knee", "right_knee"),
-          send_head: bool = False) -> list[Tracker]:
+          send_head: bool = False, state: dict | None = None,
+          foot_mode: str = "exact") -> list[Tracker]:
+    """state: optional dict kept between frames (foot yaw continuity).
+    foot_mode: "exact" (default, chosen in VRChat: livelier) keeps heel->toe exactly; "flat" = foot forced perpendicular to the shin (stable, the
+    tested default; ankle flex/extension is lost); "exact" = heel->toe kept
+    exactly, so pointed toes (ballet) and flexed feet reach VRChat, at the
+    price of more jitter from noisy heel/toe keypoints."""
     P = to_unity(P_world)
     g = lambda n: P[IDX[n]]
     up_world = np.array([0, 1.0, 0])
@@ -75,10 +165,14 @@ def solve(P_world: np.ndarray, enabled=("hip", "chest", "left_foot", "right_foot
     sh_right = g("right_shoulder") - g("left_shoulder")
     add("chest", chest_pos, frame(spine, np.cross(sh_right, spine)))
     for side in ("left", "right"):
+        # Foot rotation: the version that tested best in VRChat (shin as "up",
+        # heel->toe as "forward"). foot_frame() is kept but not used: on real
+        # play it made the feet worse.
         toe = (g(f"{side}_big_toe") + g(f"{side}_small_toe")) / 2
         foot_fwd = toe - g(f"{side}_heel")
         shin_up = g(f"{side}_knee") - g(f"{side}_ankle")
-        add(f"{side}_foot", g(f"{side}_ankle"), frame(shin_up, foot_fwd))
+        Rf = frame_fwd(foot_fwd, shin_up) if foot_mode == "exact" else frame(shin_up, foot_fwd)
+        add(f"{side}_foot", g(f"{side}_ankle"), Rf)
         thigh = g(f"{side}_hip") - g(f"{side}_knee")
         # Knee forward: the bend direction when clearly bent, else the body's
         # facing (a straight leg has no stable bend direction).
@@ -95,13 +189,18 @@ def solve(P_world: np.ndarray, enabled=("hip", "chest", "left_foot", "right_foot
 
 
 def is_tpose(P_world: np.ndarray) -> bool:
-    """Arms stretched sideways at shoulder height (VRChat's calibration pose)."""
+    """Arms stretched sideways at shoulder height (VRChat's calibration pose):
+    wrists at least 85% of the full arm span apart (the span measured on this
+    same skeleton, so it does not depend on body proportions) and level with
+    the shoulders."""
     g = lambda n: P_world[IDX[n]]
     sh = np.linalg.norm(g("left_shoulder") - g("right_shoulder"))
+    arms = sum(np.linalg.norm(g(f"{s}_shoulder") - g(f"{s}_elbow")) + np.linalg.norm(g(f"{s}_elbow") - g(f"{s}_wrist"))
+               for s in ("left", "right"))
     span = np.linalg.norm(g("left_wrist") - g("right_wrist"))
     level = max(abs(g("left_wrist")[1] - g("left_shoulder")[1]),
                 abs(g("right_wrist")[1] - g("right_shoulder")[1]))
-    return span > 3.5 * sh and level < 0.15
+    return span > 0.85 * (sh + arms) and level < 0.15
 
 
 def is_hands_up(P_world: np.ndarray) -> bool:
@@ -111,7 +210,7 @@ def is_hands_up(P_world: np.ndarray) -> bool:
     return g("left_wrist")[1] > top + 0.05 and g("right_wrist")[1] > top + 0.05
 
 
-def head_tracker(P_world: np.ndarray, source: str = "ears") -> Tracker:
+def head_tracker(P_world: np.ndarray, source: str = "ears", forward: float = 0.0) -> Tracker:
     """The head as VRChat needs it for aligning our space to the headset.
 
     VRChat (docs: osc-trackers) uses it in two ways:
@@ -136,6 +235,9 @@ def head_tracker(P_world: np.ndarray, source: str = "ears") -> Tracker:
         right = g("right_hip") - g("left_hip")
         root = g("neck") + 0.10 * _n(spine)
     fwd = np.cross(right, up)  # Unity: Cross(right, up) = forward
+    # Tunable horizontal shift of the anchor along the facing direction. Moving
+    # the head point BACK makes VRChat place all trackers further FORWARD.
+    root = root + forward * _n(np.array([fwd[0], 0.0, fwd[2]]))
     return Tracker("head", tuple(map(float, root)), unity_euler(frame(up, fwd)))
 
 

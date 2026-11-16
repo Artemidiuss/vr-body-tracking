@@ -23,7 +23,7 @@ from .sources import CameraSource, Frame
 
 MAGIC = b"FBT1"
 HDR = struct.Struct(">4sBBHIqI")  # magic type flags rsv seq ts len  (24 bytes)
-HELLO, CONFIG, FRAME, PING, PONG, KEYFRAME_REQ = range(6)
+HELLO, CONFIG, FRAME, PING, PONG, KEYFRAME_REQ, STATUS = range(7)
 
 
 class ClockSync:
@@ -62,6 +62,9 @@ class FBTCamSource(CameraSource):
         self.codec.thread_type = "NONE"   # frame threading adds a frame of delay
         self._i = 0
         self.latency_ms: list[float] = []
+        # Phone battery / heat (STATUS packet, newer app versions): dict + Mac time received.
+        self.status: dict = {}
+        self.status_t: float | None = None
         self._pinger = threading.Thread(target=self._ping_loop, daemon=True)
 
     # -- protocol --------------------------------------------------------
@@ -114,6 +117,11 @@ class FBTCamSource(CameraSource):
             elif ptype == PONG:
                 (phone_ns,) = struct.unpack(">q", payload)
                 self.clock.add(ts / 1e9, phone_ns / 1e9, time.perf_counter())
+            elif ptype == STATUS:
+                try:
+                    self.status, self.status_t = json.loads(payload), time.perf_counter()
+                except ValueError:
+                    pass
             elif ptype == FRAME:
                 frame = self._decode(payload, bool(flags & 1), ts)
                 if frame is not None:

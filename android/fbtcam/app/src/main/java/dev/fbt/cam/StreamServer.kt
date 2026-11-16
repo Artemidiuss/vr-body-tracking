@@ -19,6 +19,7 @@ object Proto {
     const val PING = 3
     const val PONG = 4
     const val KEYFRAME_REQ = 5
+    const val STATUS = 6
     val MAGIC = byteArrayOf('F'.code.toByte(), 'B'.code.toByte(), 'T'.code.toByte(), '1'.code.toByte())
 }
 
@@ -35,6 +36,7 @@ class StreamServer(
     private val clockRealtime: () -> Boolean,
     private val onKeyframeNeeded: () -> Unit,
     private val log: (String) -> Unit,
+    private val status: () -> ByteArray = { ByteArray(0) },
 ) {
     @Volatile var hello: ByteArray = ByteArray(0)
     @Volatile var config: ByteArray? = null
@@ -95,6 +97,7 @@ class StreamServer(
         @Volatile private var waitKey = true
         @Volatile private var alive = true
         private var seq = 0
+        private var lastStatus = 0L
 
         private val writer = Thread({
             try {
@@ -131,6 +134,13 @@ class StreamServer(
                             val pl = ByteBuffer.allocate(8).putLong(now).array()
                             // pongs bypass the frame queue
                             synchronized(out) { writeRaw(Packet(Proto.PONG, 0, 0, ts, pl)) }
+                            // Battery / heat for the Mac's status screen: on the first ping, then every ~5 s.
+                            val t = SystemClock.elapsedRealtime()
+                            if (t - lastStatus > 5000) {
+                                lastStatus = t
+                                val st = try { status() } catch (e: Exception) { ByteArray(0) }
+                                if (st.isNotEmpty()) synchronized(out) { writeRaw(Packet(Proto.STATUS, 0, 0, 0, st)) }
+                            }
                         }
                         Proto.KEYFRAME_REQ -> onKeyframeNeeded()
                     }

@@ -85,7 +85,34 @@ class SkeletonFit:
     def ready(self) -> bool:
         return self.lengths is not None
 
+    @staticmethod
+    def lengths_from(skel: np.ndarray, symmetric: bool = True) -> np.ndarray:
+        """Median bone lengths (per child joint) of a triangulated recording (N,26,3)."""
+        L = np.full((len(skel), NUM_KEYPOINTS), np.nan)
+        for c, p in _CHAIN:
+            L[:, c] = np.linalg.norm(skel[:, c] - skel[:, p], axis=1)
+        full = np.all(np.isfinite(skel[:, SkeletonFit.FULL_BODY, 0]), axis=1)
+        with np.errstate(all="ignore"), __import__("warnings").catch_warnings():
+            __import__("warnings").simplefilter("ignore", RuntimeWarning)
+            med = np.nanmedian(L[full] if full.sum() >= 30 else L, axis=0)
+        if symmetric:
+            for n in list(IDX):
+                if n.startswith("left_"):
+                    r = IDX[n.replace("left_", "right_")]
+                    m = np.nanmean([med[IDX[n]], med[r]])
+                    med[IDX[n]] = med[r] = m
+        return med
+
+    # Only frames where the whole body is triangulated count: right after "start"
+    # the user is often still at the laptop, half out of view, and learning from
+    # those frames gave 17 cm forearms (so the T-pose was never recognised).
+    FULL_BODY = [IDX[n] for n in ("left_shoulder", "right_shoulder", "left_elbow", "right_elbow",
+                                  "left_wrist", "right_wrist", "left_hip", "right_hip",
+                                  "left_knee", "right_knee", "left_ankle", "right_ankle")]
+
     def _learn(self, P, valid):
+        if not np.all(valid[self.FULL_BODY]):
+            return
         L = np.full(NUM_KEYPOINTS, np.nan)
         for c, p in _CHAIN:
             if valid[c] and valid[p]:
@@ -219,15 +246,71 @@ class FootLock:
         return P
 
 
+class MotionPredictor:
+    """Latency hiding (Fever/PinoFBT-style velocity extrapolation), gated by
+    speed so nothing is added while a joint is still, and clamped like
+    KinectToVR's maxDeviation. Chosen on our session logs
+    (tools/eval_prediction.py): at 80 ms it removes ~24% of the lag error in
+    motion, adds no error at rest, +10% jitter."""
+
+    def __init__(self, horizon_s=0.08, lo=0.15, hi=0.5, v_smooth=0.4, clamp=0.05):
+        self.h, self.lo, self.hi, self.vs, self.clamp = horizon_s, lo, hi, v_smooth, clamp
+        self.prev = None
+        self.t = None
+        self.v = None
+
+    def __call__(self, P: np.ndarray, t: float) -> np.ndarray:
+        if self.prev is None or self.h <= 0:
+            self.prev, self.t, self.v = P.copy(), t, np.zeros_like(P)
+            return P
+        dt = max(t - self.t, 1e-3)
+        self.v = (1 - self.vs) * self.v + self.vs * (P - self.prev) / dt
+        self.prev, self.t = P.copy(), t
+        sp = np.linalg.norm(self.v, axis=1, keepdims=True)
+        w = np.clip((sp - self.lo) / (self.hi - self.lo), 0, 1)
+        d = self.v * self.h * w
+        n = np.linalg.norm(d, axis=1, keepdims=True)
+        d = np.where(n > self.clamp, d * (self.clamp / np.maximum(n, 1e-9)), d)
+        return P + d
+
+
+class FloorClip:
+    """SlimeVR LegTweaks "floor clip": a foot can never be below the floor.
+    If the lowest heel/toe point of a foot is under the floor (y=0 after
+    calibration), the whole foot (ankle, heel, toes) is lifted together, so its
+    rotation is unchanged. Only physically impossible frames are touched
+    (measured: ~15% of frames had a foot point below the floor, mostly < 3 cm,
+    i.e. keypoint noise of a foot standing on the floor). Knees likewise."""
+
+    FEET = {s: [IDX[f"{s}_{p}"] for p in ("ankle", "heel", "big_toe", "small_toe")]
+            for s in ("left", "right")}
+    KNEES = [IDX["left_knee"], IDX["right_knee"]]
+
+    def __init__(self, floor: float = 0.0):
+        self.floor = floor
+
+    def __call__(self, P: np.ndarray) -> np.ndarray:
+        P = P.copy()
+        for idx in self.FEET.values():
+            low = P[idx, 1].min()
+            if low < self.floor:
+                P[idx, 1] += self.floor - low
+        for k in self.KNEES:
+            P[k, 1] = max(P[k, 1], self.floor + 0.05)
+        return P
+
+
 class SkeletonStabilizer:
     """outlier gate -> bone-length fit -> One-Euro -> foot lock -> (optional) prediction."""
 
     def __init__(self, min_cutoff=2.5, beta=0.4, predict_s=0.0, learn_frames=90, gate=True,
-                 power=1.0, foot_lock=False):
+                 power=1.0, foot_lock=False, floor_clip=False, predict_gated=0.0):
         self.gate = OutlierGate() if gate else None
         self.fit = SkeletonFit(learn_frames)
         self.euro = OneEuro(min_cutoff, beta, power=power)
         self.lock = FootLock() if foot_lock else None
+        self.clip = FloorClip() if floor_clip else None
+        self.pred = MotionPredictor(predict_gated) if predict_gated > 0 else None
         self.predict_s = predict_s
 
     def __call__(self, P, valid, t):
@@ -235,8 +318,12 @@ class SkeletonStabilizer:
             P, valid = self.gate(P, valid, t)
         full = self.fit(P, valid)
         sm = self.euro(full.ravel(), t).reshape(-1, 3)
+        if self.pred is not None:
+            sm = self.pred(sm, t)
         if self.lock is not None:
             sm = self.lock(sm, t)
+        if self.clip is not None:
+            sm = self.clip(sm)
         if self.predict_s > 0:
             sm = sm + self.euro.velocity.reshape(-1, 3) * self.predict_s
         return sm

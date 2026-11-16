@@ -200,3 +200,78 @@ class NetworkEmulator(CameraSource):
     def stop(self):
         self.inner.stop()
         super().stop()
+
+
+class ReplaySource(CameraSource):
+    """A recording (tools.record / the app's calibration: camN.mp4 + camN.csv)
+    replayed as a live camera on the perf_counter clock, looping. All cameras of
+    one recording share one time base, so their capture times stay in sync —
+    the whole app can be tested without phones."""
+
+    _bases: dict = {}
+
+    def __init__(self, camera_id: str, rec_dir: str, cam: str, loop: bool = True):
+        import csv
+        import glob
+        import json
+        import os
+        super().__init__(camera_id)
+        self.rec_dir, self.cam, self.loop = rec_dir, cam, loop
+        rows = list(csv.DictReader(open(f"{rec_dir}/{cam}.csv")))
+        self.times = [float(r["t_capture"]) for r in rows]
+        # Each frame is delivered after the latency it really had (phones ~110 ms, the Mac
+        # ~45 ms): the hub's synchronisation depends on which camera arrives first.
+        self.lat = [float(r.get("latency_ms") or 0) / 1000 for r in rows]
+        info = json.load(open(f"{rec_dir}/info.json"))
+        self.info = dict(info.get(cam, {}))
+        self.host = f"replay:{rec_dir}/{cam}"
+        self.latency_ms: list[float] = []
+        self.status: dict = {}
+        self.status_t = None
+        if rec_dir not in ReplaySource._bases:
+            firsts, lasts = [], []
+            for p in glob.glob(f"{rec_dir}/cam*.csv"):
+                ts = [float(r["t_capture"]) for r in csv.DictReader(open(p))]
+                if ts:
+                    firsts.append(ts[0]); lasts.append(ts[-1])
+            t0 = min(firsts)
+            ReplaySource._bases[rec_dir] = (t0, time.perf_counter() + 0.5, max(lasts) - t0 + 0.2)
+        self.t0, self.p0, self.dur = ReplaySource._bases[rec_dir]
+        self.cap = cv2.VideoCapture(os.path.join(rec_dir, f"{cam}.mp4"))
+        self._k, self._j, self._i = 0, 0, 0
+        while self._live_t(self._j) < time.perf_counter() and self._j < len(self.times) - 1:
+            self.cap.read()     # join an already running replay at the right frame
+            self._j += 1
+
+    def _live_t(self, j: int) -> float:
+        return self.p0 + self._k * self.dur + self.times[j] - self.t0
+
+    def _read(self) -> Frame | None:
+        while not self._stop.is_set():
+            if self._j >= len(self.times):
+                if not self.loop:
+                    return None
+                self._k += 1
+                self._j = 0
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            ok, img = self.cap.read()
+            if not ok:
+                self._j = len(self.times)
+                continue
+            t = self._live_t(self._j)
+            lat = self.lat[self._j]
+            self._j += 1
+            delay = t + lat - time.perf_counter()
+            if delay < -0.1:
+                continue        # fell behind: skip, like a live camera would
+            if delay > 0:
+                time.sleep(delay)
+            f = Frame(self.camera_id, self._i, t, img)
+            self.latency_ms.append(lat * 1000)
+            self.latency_ms = self.latency_ms[-300:]
+            self._i += 1
+            return f
+        return None
+
+    def _close(self) -> None:
+        self.cap.release()

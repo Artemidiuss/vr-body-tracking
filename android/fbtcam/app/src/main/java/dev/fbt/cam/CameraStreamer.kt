@@ -26,6 +26,9 @@ data class StreamConfig(
     val fps: Int,
     val highSpeed: Boolean,
     val bitrate: Int,
+    val previewTemplate: Boolean = true,   // TEMPLATE_PREVIEW + fast NR/edge (else RECORD)
+    val maxOperatingRate: Boolean = true,  // encoder KEY_OPERATING_RATE = max + CBR
+    val exposureCompSteps: Int = 0,        // AE compensation (steps); <0 = shorter exposure
 )
 
 /**
@@ -49,6 +52,13 @@ class CameraStreamer(
     private var device: CameraDevice? = null
     private var session: CameraCaptureSession? = null
     @Volatile var encodedFrames = 0L
+    private val latencies = ArrayDeque<Double>()
+    /** Clock the sensor stamps frames with (detected by StreamServer). */
+    @Volatile var clockNs: () -> Long = { System.nanoTime() }
+
+    fun medianEncodeLatencyMs(): Double? = synchronized(latencies) {
+        if (latencies.isEmpty()) null else latencies.sorted()[latencies.size / 2]
+    }
 
     @SuppressLint("MissingPermission")
     fun start() {
@@ -62,7 +72,13 @@ class CameraStreamer(
             setInteger(MediaFormat.KEY_PRIORITY, 0)          // realtime
             setInteger(MediaFormat.KEY_MAX_B_FRAMES, 0)
             setInteger(MediaFormat.KEY_LATENCY, 1)
-            if (cfg.highSpeed) setInteger(MediaFormat.KEY_OPERATING_RATE, cfg.fps)
+            // Run the encoder as fast as it can instead of pacing it to the
+            // frame rate (common low-latency streaming setting), constant
+            // bitrate (no rate-control look-ahead).
+            if (cfg.maxOperatingRate) {
+                setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE.toInt())
+                setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR)
+            } else if (cfg.highSpeed) setInteger(MediaFormat.KEY_OPERATING_RATE, cfg.fps)
         }
         val enc = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         enc.setCallback(object : MediaCodec.Callback() {
@@ -77,6 +93,13 @@ class CameraStreamer(
                     onConfig(data)
                 } else if (info.size > 0) {
                     encodedFrames++
+                    // Capture -> encoded latency measured on the phone itself
+                    // (sensor timestamp vs the same clock now).
+                    val nowUs = clockNs() / 1000
+                    val lat = (nowUs - info.presentationTimeUs) / 1000.0
+                    if (lat in 0.0..2000.0) synchronized(latencies) {
+                        latencies.addLast(lat); while (latencies.size > 60) latencies.removeFirst()
+                    }
                     onFrame(data, info.presentationTimeUs,
                         info.flags and MediaCodec.BUFFER_FLAG_KEY_FRAME != 0)
                 }
@@ -111,9 +134,17 @@ class CameraStreamer(
     }
 
     private fun startRepeating(d: CameraDevice, s: CameraCaptureSession, surfaces: List<Surface>) {
-        val b = d.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
+        // PREVIEW template + fast processing: the RECORD template asks the ISP for
+        // high-quality noise reduction/edge enhancement, which costs latency.
+        val b = d.createCaptureRequest(
+            if (cfg.previewTemplate) CameraDevice.TEMPLATE_PREVIEW else CameraDevice.TEMPLATE_RECORD)
+        if (cfg.previewTemplate) {
+            b.set(CaptureRequest.NOISE_REDUCTION_MODE, CaptureRequest.NOISE_REDUCTION_MODE_FAST)
+            b.set(CaptureRequest.EDGE_MODE, CaptureRequest.EDGE_MODE_FAST)
+        }
         surfaces.forEach { b.addTarget(it) }
         b.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, Range(cfg.fps, cfg.fps))
+        if (cfg.exposureCompSteps != 0) b.set(CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION, cfg.exposureCompSteps)
         if (cfg.highSpeed) {
             val hs = s as CameraConstrainedHighSpeedCaptureSession
             hs.setRepeatingBurst(hs.createHighSpeedRequestList(b.build()), null, handler)

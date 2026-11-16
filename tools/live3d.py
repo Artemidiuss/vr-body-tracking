@@ -29,13 +29,24 @@ from tools.bench_pose import draw
 class CamWorker:
     """Runs pose on the newest frame of one camera; keeps recent results."""
 
-    def __init__(self, src: FBTCamSource, backend_spec: str):
+    def __init__(self, src, backend_spec: str, t_offset: float = 0.0, border: float = 0.0,
+                 max_rate: float = 0.0):
+        """t_offset: s added to frame timestamps (calibrated clock offset).
+        border: keypoints within this fraction of the image edge (or outside
+        it) get score 0 — for a camera that sees only part of the body, where
+        the model still guesses the cut-off joints."""
         self.src = src
+        self.t_offset, self.border = t_offset, border
+        # max_rate (Hz, 0 = every frame): an auxiliary camera computes fewer poses
+        # so the GPU keeps up with the phones on a hot, fanless Air.
+        self.min_interval = 1.0 / max_rate if max_rate else 0.0
+        self._last_t = -1e9
         self.backend = make_backend(backend_spec)
         self.poses = collections.deque(maxlen=8)   # (t_capture, Pose2D)
         self.last_img = None
         self.last_pose = None
         self.pose_ms = 0.0
+        self.n_pose = 0           # poses computed (for rate stats)
         self.lock = threading.Lock()
         self.new = threading.Event()
         threading.Thread(target=self.loop, daemon=True).start()
@@ -50,23 +61,40 @@ class CamWorker:
                 time.sleep(0.001)
                 continue
             last = f.index
+            if self.min_interval and f.timestamp - self._last_t < self.min_interval - 0.005:
+                continue
+            self._last_t = f.timestamp
             t0 = time.perf_counter()
-            p = self.backend(f.image)
+            try:
+                p = self.backend(f.image)
+            except Exception as e:   # never let one bad frame kill this camera for the session
+                self.errors = getattr(self, "errors", 0) + 1
+                if self.errors <= 3:
+                    print(f"\npose error on {self.src.camera_id}: {e!r} — skipping frame", flush=True)
+                p = None
+            if p is not None and self.border > 0:
+                h, w = f.image.shape[:2]
+                u, v = p.keypoints[:, 0], p.keypoints[:, 1]
+                b = self.border
+                out = (u < b * w) | (u > (1 - b) * w) | (v < b * h) | (v > (1 - b) * h)
+                if out.any():
+                    p = Pose2D(p.keypoints, np.where(out, 0.0, p.scores).astype(np.float32))
             self.pose_ms = 0.9 * self.pose_ms + 0.1 * (time.perf_counter() - t0) * 1000
+            self.n_pose += 1
             with self.lock:
                 self.last_img, self.last_pose = f.image, p
                 if p is not None:
-                    self.poses.append((f.timestamp, p))
+                    self.poses.append((f.timestamp + self.t_offset, p))
             self.new.set()
 
-    def pose_at(self, t: float, max_dt: float = 0.05) -> Pose2D | None:
+    def pose_at(self, t: float, max_dt: float = 0.05, max_gap: float = 0.1) -> Pose2D | None:
         """Pose interpolated to capture time t (or nearest within max_dt)."""
         with self.lock:
             ps = list(self.poses)
         if not ps:
             return None
         for (t0, p0), (t1, p1) in zip(ps, ps[1:]):
-            if t0 <= t <= t1 and t1 - t0 < 0.1:
+            if t0 <= t <= t1 and t1 - t0 < max_gap:
                 w = (t - t0) / (t1 - t0) if t1 > t0 else 0
                 return Pose2D(((1 - w) * p0.keypoints + w * p1.keypoints).astype(np.float32),
                               np.minimum(p0.scores, p1.scores))

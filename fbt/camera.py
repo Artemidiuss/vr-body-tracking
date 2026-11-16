@@ -22,6 +22,7 @@ class Camera:
     width: int
     height: int
     dist: np.ndarray | None = None  # OpenCV distortion coeffs (unused for now)
+    time_offset: float = 0.0        # s added to this camera's frame timestamps
 
     @property
     def P(self) -> np.ndarray:

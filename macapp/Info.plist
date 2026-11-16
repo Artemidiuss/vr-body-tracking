@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>FBT</string>
+  <key>CFBundleDisplayName</key><string>FBT</string>
+  <key>CFBundleIdentifier</key><string>dev.fbt.hub</string>
+  <key>CFBundleExecutable</key><string>FBT</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>LSMinimumSystemVersion</key><string>13.0</string>
+  <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+  <key>NSHighResolutionCapable</key><true/>
+  <key>NSCameraUsageDescription</key><string>FBT використовує камеру MacBook як третю камеру для трекінгу тіла.</string>
+  <key>NSLocalNetworkUsageDescription</key><string>FBT отримує відео з телефонів і надсилає трекери в шолом через вашу Wi-Fi мережу.</string>
+  <key>NSBonjourServices</key><array><string>_oscjson._tcp</string><string>_osc._udp</string></array>
+  <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
+  <key>FBTRepo</key><string>__REPO__</string>
+</dict>
+</plist>

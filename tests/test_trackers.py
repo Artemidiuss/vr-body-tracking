@@ -119,3 +119,39 @@ def test_hands_up_detector():
     for side in ("left", "right"):
         U[IDX[f"{side}_wrist"]] = J[IDX["head"]] + [0.1 if side == "left" else -0.1, 0.25, 0]
     assert is_hands_up(U)
+
+
+def test_exact_foot_mode_transmits_pointed_toes():
+    from fbt.trackers import solve
+    J = skeleton_from_state(BodyState(ankle=(-1.0, 0.0)))   # left toes pointed down
+    flat = next(t for t in solve(J, foot_mode="flat") if t.id == "3").rotation
+    exact = next(t for t in solve(J, foot_mode="exact") if t.id == "3").rotation
+    # Unity pitch (x) positive = nose down; exact mode must show the extension.
+    assert exact[0] - flat[0] > 30
+
+
+def test_floor_clip_lifts_whole_foot_only_when_below_floor():
+    from fbt.filters import FloorClip
+    J = skeleton_from_state(BodyState())
+    clip = FloorClip()
+    assert np.allclose(clip(J), J)                      # standing on the floor: untouched
+    sunk = J.copy()
+    for n in ("left_ankle", "left_heel", "left_big_toe", "left_small_toe"):
+        sunk[IDX[n], 1] -= 0.05
+    out = clip(sunk)
+    lf = [IDX[n] for n in ("left_heel", "left_big_toe", "left_small_toe")]
+    assert abs(out[lf, 1].min()) < 1e-9                 # lifted back to the floor
+    assert np.allclose(out[IDX["right_ankle"]], J[IDX["right_ankle"]])
+
+
+def test_motion_predictor_quiet_at_rest_and_leads_in_motion():
+    from fbt.filters import MotionPredictor
+    p = MotionPredictor(0.08)
+    rng = np.random.default_rng(0)
+    base = np.zeros((26, 3))
+    rest = [p(base + rng.normal(0, 0.002, base.shape), i / 30) for i in range(30)]
+    assert np.abs(rest[-1]).max() < 0.01                       # no extrapolated noise at rest
+    p = MotionPredictor(0.08)
+    for i in range(30):
+        out = p(base + [i * 0.03, 0, 0], i / 30)               # 0.9 m/s
+    assert out[0, 0] - 29 * 0.03 > 0.04                        # leads by ~7 cm (clamped at 5)

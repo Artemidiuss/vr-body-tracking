@@ -50,29 +50,60 @@ def _reproj_err(cams, X, uvs) -> np.ndarray:
 
 
 def triangulate_pose(cams: list[Camera], poses: list[Pose2D | None],
-                     min_score: float = 0.3, max_err_px: float = 25.0) -> Pose3D:
+                     min_score: float = 0.3, max_err_px=25.0, view_weight=1.0) -> Pose3D:
     """Triangulate one frame. Points seen by < 2 cameras, or whose
     reprojection error stays above max_err_px after dropping the worst view,
     are marked invalid (the solver later fills them from the skeleton model).
+    max_err_px: one value, or one per camera (a close camera sees the same
+    metric error as more pixels); views are compared by error / threshold.
+    view_weight: per-camera multiplier of the DLT weight. A DLT row's error is
+    focal x metric error, so a long-focal (or close) camera outweighs the
+    others for no reason; f_ref / f_camera puts all views on equal terms.
     """
+    thr = np.broadcast_to(np.asarray(max_err_px, float), (len(cams),))
+    vw = np.broadcast_to(np.asarray(view_weight, float), (len(cams),))
     pts = np.zeros((NUM_KEYPOINTS, 3))
     valid = np.zeros(NUM_KEYPOINTS, bool)
     err = np.full(NUM_KEYPOINTS, np.inf)
     nv = np.zeros(NUM_KEYPOINTS, int)
     for k in range(NUM_KEYPOINTS):
-        views = [(c, p.keypoints[k], p.scores[k]) for c, p in zip(cams, poses)
+        views = [(c, p.keypoints[k], p.scores[k] * vw[i], thr[i]) for i, (c, p) in enumerate(zip(cams, poses))
                  if p is not None and p.scores[k] >= min_score]
         while len(views) >= 2:
             X = triangulate_point([v[0].P for v in views],
                                   np.array([v[1] for v in views]),
                                   np.array([v[2] for v in views]))
             e = _reproj_err([v[0] for v in views], X, [v[1] for v in views])
-            if e.max() <= max_err_px or len(views) == 2:
-                ok = e.max() <= max_err_px
+            r = e / np.array([v[3] for v in views])
+            if r.max() <= 1.0 or len(views) == 2:
+                ok = r.max() <= 1.0
                 pts[k], valid[k], err[k], nv[k] = X, ok, e.mean(), len(views)
                 break
-            views.pop(int(np.argmax(e)))  # 3+ views: drop the outlier view
+            views.pop(int(np.argmax(r)))  # 3+ views: drop the outlier view
     return Pose3D(pts, valid, err, nv, [False] * len(cams))
+
+
+def view_weights(cams: list[Camera], n_ref: int = 2) -> np.ndarray:
+    """DLT weight multipliers: 1 for the first n_ref cameras (phones), f_ref / f
+    for the others, so a long-focal camera does not outweigh the phones.
+    Offline (held-out half of a recording): upper-body bone spread 1.68 -> 1.36 cm."""
+    w = np.ones(len(cams))
+    if len(cams) > n_ref:
+        fref = np.mean([c.K[0, 0] for c in cams[:n_ref]])
+        w[n_ref:] = [fref / c.K[0, 0] for c in cams[n_ref:]]
+    return w
+
+
+def view_thresholds(cams: list[Camera], base_px: float = 25.0, n_ref: int = 2,
+                    subject=(0.0, 1.0, 0.0)) -> np.ndarray:
+    """Per-camera reprojection thresholds: base_px for the first n_ref
+    cameras (the phones, unchanged), scaled for the others by their pixels
+    per metre at the user (focal / distance) relative to the phones'."""
+    ppm = np.array([c.K[0, 0] / np.linalg.norm(c.center - np.asarray(subject)) for c in cams])
+    thr = np.full(len(cams), base_px)
+    if len(cams) > n_ref:
+        thr[n_ref:] = base_px * ppm[n_ref:] / ppm[:n_ref].mean()
+    return thr
 
 
 def _swap(p: Pose2D) -> Pose2D:

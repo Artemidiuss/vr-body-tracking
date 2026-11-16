@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FBT</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <!-- Setup: cameras, 3D, calibration -->
+  <div id="setup" class="screen">
+    <header class="top">
+      <div class="brand">FBT</div>
+      <div id="chips" class="chips"></div>
+      <button id="gear" class="icon-btn" title="Налаштування" aria-label="Налаштування">
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </header>
+    <section id="videos" class="videos"></section>
+    <section class="bottom">
+      <div class="render-wrap">
+        <canvas id="render"></canvas>
+        <div class="render-hint">тягни, щоб покрутити</div>
+      </div>
+      <div id="panel" class="panel"></div>
+    </section>
+  </div>
+
+  <!-- Game: big, readable from 1-2 m -->
+  <div id="game" class="screen hidden">
+    <div class="game-main">
+      <div id="gStatus" class="g-status"><span class="g-dot"></span><span class="g-text">Працює</span></div>
+      <div id="gSub" class="g-sub"></div>
+      <div id="gCards" class="g-cards"></div>
+    </div>
+    <footer class="g-foot">
+      <div id="gInfo" class="g-info"></div>
+      <button id="btnStop" class="btn ghost">Зупинити</button>
+    </footer>
+  </div>
+
+  <!-- Settings -->
+  <div id="settings" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="setTitle">
+    <form id="setForm" class="sheet">
+      <h2 id="setTitle">Налаштування</h2>
+      <div class="sheet-body">
+        <h3>Основне</h3>
+        <label>Твій зріст, м<input name="height_m" type="number" step="0.01" min="1.2" max="2.3"></label>
+        <div class="row2">
+          <label>IP першого телефона<input name="cam0" inputmode="decimal"></label>
+          <label>IP другого телефона<input name="cam1" inputmode="decimal"></label>
+        </div>
+        <label>IP шолома<input name="quest_ip" inputmode="decimal"></label>
+
+        <h3>Трекери</h3>
+        <p class="note">Стегна і стопи увімкнені завжди.</p>
+        <label class="check"><input name="track_chest" type="checkbox"> Груди</label>
+        <label class="check"><input name="track_knees" type="checkbox"> Коліна</label>
+        <label class="check"><input name="track_elbows" type="checkbox"> Лікті <span class="note">(руки й так ведуть контролери, вмикай для повного тіла)</span></label>
+        <label class="check"><input name="foot_flat" type="checkbox"> Стопи завжди рівно <span class="note">(стабільніше, але без носочків)</span></label>
+
+        <h3>Плавність і положення <button type="button" id="setReset" class="link">Скинути</button></h3>
+        <div id="sliders"></div>
+
+        <h3>Інше</h3>
+        <label class="check"><input name="hmd_anchor" type="checkbox"> Прив'язувати трекери до шолома <span class="note">(коли VRChat надсилає його дані)</span></label>
+        <label class="check"><input name="use_mac" type="checkbox"> Камера MacBook допомагає трекінгу</label>
+        <label class="check"><input name="voice_alerts" type="checkbox"> Голосом казати в грі, якщо камера відключилась чи сідає</label>
+      </div>
+      <div class="sheet-actions">
+        <button type="button" id="setCancel" class="btn ghost">Скасувати</button>
+        <button type="submit" class="btn primary">Зберегти</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

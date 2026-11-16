@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 from dataclasses import dataclass
 
 import cv2
@@ -28,7 +29,7 @@ from scipy.sparse import lil_matrix
 
 from .camera import Camera
 from .skeleton import IDX, NUM_KEYPOINTS
-from .triangulate import triangulate_point
+from .triangulate import triangulate_point, triangulate_pose
 
 # Body points only: face points are unreliable from behind and nearly coplanar.
 BODY = [IDX[n] for n in (
@@ -58,8 +59,15 @@ class PoseTrack:
     info: dict
 
 
-def poses_from_recording(rec_dir: str, cam: str, backend, every: int = 1) -> PoseTrack:
+def poses_from_recording(rec_dir: str, cam: str, backend, every: int = 1,
+                         cache: bool = True) -> PoseTrack:
+    """2D poses of every frame of a recorded camera. Cached next to the video
+    (poses_<cam>.npz) so calibration and offline evaluations share one pass."""
     info = json.load(open(f"{rec_dir}/info.json"))[cam]
+    cpath = f"{rec_dir}/poses_{cam}.npz"
+    if cache and every == 1 and os.path.exists(cpath):
+        z = np.load(cpath)
+        return PoseTrack(z["t"], z["kp"], z["sc"], int(z["wh"][0]), int(z["wh"][1]), info)
     times = [float(r["t_capture"]) for r in csv.DictReader(open(f"{rec_dir}/{cam}.csv"))]
     cap = cv2.VideoCapture(f"{rec_dir}/{cam}.mp4")
     T, K, S = [], [], []
@@ -74,7 +82,10 @@ def poses_from_recording(rec_dir: str, cam: str, backend, every: int = 1) -> Pos
             if p is not None:
                 T.append(times[i]); K.append(p.keypoints); S.append(p.scores)
         i += 1
-    return PoseTrack(np.array(T), np.array(K), np.array(S), w, h, info)
+    tr = PoseTrack(np.array(T), np.array(K), np.array(S), w, h, info)
+    if cache and every == 1 and len(T):
+        np.savez(cpath, t=tr.t, kp=tr.kp, sc=tr.sc, wh=np.array([w, h]))
+    return tr
 
 
 def pair_tracks(a: PoseTrack, b: PoseTrack, max_dt: float = 0.04):
@@ -236,10 +247,140 @@ def calibrate_pair(a: PoseTrack, b: PoseTrack, height_m: float, min_score: float
                   "angle_deg": float(ang), "frames": int(len(pa)), "points": int(n)}
 
 
+def triangulate_tracks(cams: list[Camera], a: PoseTrack, b: PoseTrack, min_score: float = 0.4):
+    """World skeletons from two calibrated cameras at A's frame times.
+    Returns (times (N,), points (N,26,3) with NaN where not triangulated)."""
+    from .pose import Pose2D
+    pa, pb, sa, sb, ts = pair_tracks(a, b)
+    skel = np.full((len(ts), NUM_KEYPOINTS, 3), np.nan)
+    for f in range(len(ts)):
+        r = triangulate_pose(cams, [Pose2D(pa[f], sa[f]), Pose2D(pb[f], sb[f])], min_score=min_score)
+        skel[f, r.valid] = r.points[r.valid]
+    return ts, skel
+
+
+def _interp_skeleton(ts, skel, t_query, max_gap: float = 0.1):
+    """Linear interpolation of (N,26,3) skeletons at t_query (M,); NaN outside / over gaps."""
+    j = np.searchsorted(ts, t_query)
+    ok = (j > 0) & (j < len(ts))
+    j = np.clip(j, 1, len(ts) - 1)
+    t0, t1 = ts[j - 1], ts[j]
+    ok &= (t1 - t0) <= max_gap
+    w = ((t_query - t0) / np.maximum(t1 - t0, 1e-9))[:, None, None]
+    out = (1 - w) * skel[j - 1] + w * skel[j]       # NaN propagates
+    out[~ok] = np.nan
+    return out
+
+
+# Points used to place an extra camera: body + face (a camera in front sees
+# the face well; from behind the face points get low scores and drop out).
+EXTRA_PTS = sorted(set(BODY) | {IDX[n] for n in ("nose", "left_eye", "right_eye", "left_ear", "right_ear")})
+
+
+def calibrate_extra(track: PoseTrack, ts: np.ndarray, skel: np.ndarray, name: str = "extra",
+                    min_score: float = 0.5, border: float = 0.02, max_dt: float = 0.15,
+                    focal: float | None = None, focal_range: tuple[float, float] | None = None,
+                    log=print) -> tuple[Camera, dict]:
+    """Place one more camera (e.g. the MacBook's) in an existing calibration.
+
+    The phones already give the world 3D skeleton over the recording; this
+    camera gives 2D keypoints of the same moments, so its pose is a standard
+    PnP problem (no new essential-matrix step). Unknowns solved: rotation,
+    translation, focal length (the Mac reports none: grid of field-of-view
+    guesses + refinement) and the clock offset between this camera's
+    timestamps and the phones' (grid search, re-solving each step).
+    Robust (Huber) least squares on the reprojection error.
+
+    focal / focal_range: the body seen from one distance barely separates
+    focal length from distance (measured on the MacBook: one half of a
+    recording gave 28° at 3.4 m, the other 60° at 1.5 m, same 20 px error).
+    A known focal, or a plausible range, removes that degeneracy.
+    """
+    w, h = track.width, track.height
+    cx, cy = w / 2, h / 2
+
+    def corr(dt):
+        X = _interp_skeleton(ts, skel, track.t + dt)
+        m = (track.sc >= min_score) & np.isfinite(X).all(-1)
+        u, v = track.kp[..., 0], track.kp[..., 1]
+        m &= (u > border * w) & (u < (1 - border) * w) & (v > border * h) & (v < (1 - border) * h)
+        keep = np.zeros(NUM_KEYPOINTS, bool); keep[EXTRA_PTS] = True
+        m &= keep[None, :]
+        return X[m], track.kp[m].astype(np.float64)
+
+    def K_of(f):
+        return np.array([[f, 0, cx], [0, f, cy], [0, 0, 1.0]])
+
+    def refine(X, u, rv, tv, f, max_nfev=100):
+        if focal is not None:            # known intrinsics: pose only (6 unknowns)
+            def res6(x):
+                return (_proj(K_of(focal), cv2.Rodrigues(x[:3])[0], x[3:6], X) - u).ravel()
+            r = least_squares(res6, np.concatenate([rv, tv]), loss="huber", f_scale=4.0,
+                              x_scale="jac", max_nfev=max_nfev)
+            return r.x[:3], r.x[3:6], focal, np.linalg.norm(r.fun.reshape(-1, 2), axis=1)
+
+        def res(x):
+            return (_proj(K_of(x[6]), cv2.Rodrigues(x[:3])[0], x[3:6], X) - u).ravel()
+        lo, hi = focal_range if focal_range is not None else (1.0, np.inf)
+        bounds = ([-np.inf] * 6 + [lo], [np.inf] * 6 + [hi])
+        r = least_squares(res, np.concatenate([rv, tv, [np.clip(f, lo * 1.0001, hi * 0.9999)]]),
+                          loss="huber", f_scale=4.0, x_scale="jac", max_nfev=max_nfev, bounds=bounds)
+        e = np.linalg.norm(r.fun.reshape(-1, 2), axis=1)
+        return r.x[:3], r.x[3:6], r.x[6], e
+
+    X, u = corr(0.0)
+    if len(X) < 50:
+        raise RuntimeError(f"{name}: only {len(X)} usable points — is the person visible to this camera?")
+    # Initial pose: RANSAC PnP over a grid of horizontal fields of view.
+    best = None
+    if focal is not None:
+        fovs = [np.degrees(2 * np.arctan(w / 2 / focal))]
+    elif focal_range is not None:
+        fovs = np.degrees(2 * np.arctan(w / 2 / np.linspace(focal_range[1], focal_range[0], 6)))
+    else:
+        fovs = range(45, 101, 5)
+    for hfov in fovs:
+        f = (w / 2) / np.tan(np.radians(hfov) / 2)
+        ok, rv, tv, inl = cv2.solvePnPRansac(X.astype(np.float32), u.astype(np.float32), K_of(f), None,
+                                             reprojectionError=0.02 * w, iterationsCount=300,
+                                             flags=cv2.SOLVEPNP_EPNP)
+        if not ok or inl is None:
+            continue
+        rv, tv, f2, e = refine(X, u, rv.ravel(), tv.ravel(), f, max_nfev=50)
+        if f2 <= 0 or np.median((X @ cv2.Rodrigues(rv)[0].T + tv)[:, 2]) <= 0:
+            continue                                  # degenerate / points behind the camera
+        score = np.median(e)
+        if best is None or score < best[0]:
+            best = (score, rv, tv, f2)
+    if best is None:
+        raise RuntimeError(f"{name}: PnP failed")
+    _, rv, tv, f = best
+    # Clock offset: re-solve on a grid, keep the lowest median error.
+    grid = []
+    for dt in np.arange(-max_dt, max_dt + 1e-9, 0.01):
+        Xd, ud = corr(dt)
+        if len(Xd) < 50:
+            continue
+        rv_d, tv_d, f_d, e = refine(Xd, ud, rv, tv, f, max_nfev=40)
+        grid.append((float(np.median(e)), float(dt), rv_d, tv_d, f_d))
+    _, dt, rv, tv, f = min(grid, key=lambda g: g[0])
+    X, u = corr(dt)
+    rv, tv, f, e = refine(X, u, rv, tv, f, max_nfev=200)
+    R = cv2.Rodrigues(rv)[0]
+    cam = Camera(track.info.get("device", name), K_of(f), R, tv, w, h, time_offset=dt)
+    hfov = np.degrees(2 * np.arctan(w / 2 / f))
+    log(f"  {name}: {len(X)} points, reprojection median {np.median(e):.1f} px (p90 {np.percentile(e, 90):.1f}), "
+        f"focal {f:.0f} px (horizontal FOV {hfov:.0f}°), clock offset {dt * 1000:+.0f} ms")
+    log(f"  {name}: position {np.round(cam.center, 2)} m (height above floor {cam.center[1]:.2f} m)")
+    return cam, {"reproj_median_px": float(np.median(e)), "focal_px": float(f), "hfov_deg": float(hfov),
+                 "time_offset_s": dt, "points": int(len(X))}
+
+
 def save_calibration(path: str, cams: list[Camera], hosts: list[str], meta: dict):
     data = {"meta": meta, "cameras": [
         {"name": c.name, "host": h, "K": c.K.tolist(), "R": c.R.tolist(), "t": c.t.tolist(),
-         "width": c.width, "height": c.height} for c, h in zip(cams, hosts)]}
+         "width": c.width, "height": c.height, "time_offset": c.time_offset}
+        for c, h in zip(cams, hosts)]}
     with open(path, "w") as fh:
         json.dump(data, fh, indent=2)
 
@@ -247,5 +388,6 @@ def save_calibration(path: str, cams: list[Camera], hosts: list[str], meta: dict
 def load_calibration(path: str) -> tuple[list[Camera], list[str]]:
     d = json.load(open(path))
     cams = [Camera(c["name"], np.array(c["K"]), np.array(c["R"]), np.array(c["t"]),
-                   c["width"], c["height"]) for c in d["cameras"]]
+                   c["width"], c["height"], time_offset=c.get("time_offset", 0.0))
+            for c in d["cameras"]]
     return cams, [c["host"] for c in d["cameras"]]

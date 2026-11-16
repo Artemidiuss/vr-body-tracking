@@ -35,3 +35,28 @@ def test_body_calibration_recovers_cameras():
     # drift further from the truth than the phone's own (5% off) value.
     assert abs(est[0].K[0, 0] - f_px) / f_px <= 0.055
     assert abs(est[0].center[1] - 0.9) < 0.1     # camera height above floor
+
+
+def test_extra_camera_placed_from_phone_skeleton():
+    """A third, close, narrow camera behind the user that sees only the upper
+    body, with its own clock offset: PnP against the phones' 3D skeleton."""
+    from fbt.calibrate import calibrate_extra, triangulate_tracks
+    from fbt.camera import Camera
+
+    phones = ring_of_cameras([-40, 40], distance=1.6, vfov_deg=96)
+    mac = Camera.look_at("mac", (0.15, 0.85, -1.0), (0.0, 1.15, 0.0), vfov_deg=45, width=1280, height=720)
+    frames = [(t, J) for t, J, _ in motion_sequence(["walk", "squat", "side_step", "turn"], seconds_each=3)]
+    noise = NoiseModel(pixel_sigma=2.0, lr_swap_front=0, lr_swap_back=0, dropout=0.02, seed=2)
+    info = {"focal_mm": 2.0, "sensor_mm": [3.67, 2.75]}
+    a = _track(phones[0], frames, noise, 3.67, 2.0)
+    b = _track(phones[1], frames, noise, 3.67, 2.0)
+    m_noise = NoiseModel(pixel_sigma=3.0, lr_swap_front=0.0, lr_swap_back=0.05, dropout=0.02, seed=3)
+    m = _track(mac, frames, m_noise, 3.67, 2.0)
+    m.t = m.t - 0.04                    # Mac clock 40 ms early vs the phones
+    m.info = {"device": "mac"}
+    ts, skel = triangulate_tracks(phones, a, b)
+    est, meta = calibrate_extra(m, ts, skel, log=lambda *_: None)
+    assert np.linalg.norm(est.center - mac.center) < 0.05
+    assert abs(est.K[0, 0] - mac.K[0, 0]) / mac.K[0, 0] < 0.05
+    assert abs(meta["time_offset_s"] - 0.04) <= 0.011
+    assert meta["reproj_median_px"] < 15   # noise model: ~9 px sigma from behind
