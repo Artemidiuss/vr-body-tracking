@@ -26,6 +26,7 @@ from .filters import MotionPredictor, OneEuro, SkeletonFit, SkeletonStabilizer
 from .maccam import mac_focal_range, open_source
 from .osc_out import VRChatSender
 from .pose import Pose2D, make_backend
+from .poselog import FRAME3D, NO_PAIR, NO_TORSO, PoseLog
 from .skeleton import IDX
 from .trackers import head_tracker, is_tpose, solve, to_unity
 from .triangulate import triangulate_with_swap_check, view_thresholds, view_weights
@@ -605,6 +606,7 @@ class Engine:
         self.slept_auto = False
         self._caffeinate = None
         self._statsf = None
+        self._posesf: PoseLog | None = None       # every camera's 2D pose during a game (§32)
         self._quit = threading.Event()
         self.slots: list[CamSlot] = []
         self._make_slots()
@@ -739,6 +741,9 @@ class Engine:
             pb = slots[1].pose_at(t_ref) if behind == 0 else lb[1]
             if pa is None or pb is None:
                 self.skips["no synced pair"] += 1
+                pl = self._posesf
+                if pl is not None:
+                    pl.write(t_ref, NO_PAIR, [pa, pb] + [None] * (len(cams) - 2))
                 continue
             extra = []
             gap = 2.5 / max(self.settings["extra_fps"], 1)
@@ -748,6 +753,9 @@ class Engine:
                 extra.append(s.pose_at(t_ref, max_dt=0.02, max_gap=gap) if ok else None)
             res = triangulate_with_swap_check(cams, [pa, pb] + extra, prev=prev,
                                               max_err_px=thr, view_weight=vw)
+            pl = self._posesf
+            if pl is not None:
+                pl.write(t_ref, FRAME3D if res.valid[CORE].all() else NO_TORSO, [pa, pb] + extra)
             # Both phones clearly see a person but the torso does not triangulate:
             # the cameras were probably moved since the calibration.
             if (pa.scores > 0.5).sum() >= 10 and (pb.scores > 0.5).sum() >= 10:
@@ -793,6 +801,8 @@ class Engine:
                                      f"{self.d}/logs/session_{stamp}.jsonl", align=self.align, hmd=self.hmd)
             self._statsf = open(f"{self.d}/logs/session_{stamp}.log", "w")
             self.hmd.logf = open(f"{self.d}/logs/session_{stamp}_hmd.jsonl", "w")
+            self._posesf = PoseLog(f"{self.d}/logs/session_{stamp}_poses2d.bin", len(self.cams),
+                                   list(self.calib_hosts))
             if os.path.exists(self.calib_path):        # where the cameras were, for the replay page
                 shutil.copy(self.calib_path, f"{self.d}/logs/session_{stamp}_calib.json")
             self.stab = self._new_stab()      # learn bone lengths fresh, standing in the play area
@@ -817,6 +827,9 @@ class Engine:
             f, self.hmd.logf = self.hmd.logf, None
             if f:
                 f.close()
+            pl, self._posesf = self._posesf, None
+            if pl:
+                pl.close()
         if self._caffeinate:
             self._caffeinate.terminate()
             self._caffeinate = None
@@ -866,7 +879,8 @@ class Engine:
     def _rotate_logs(self):
         files = sorted(p for p in glob.glob(f"{self.d}/logs/session_*.jsonl") if not p.endswith("_hmd.jsonl"))
         for p in files[:max(0, len(files) - int(self.settings["keep_logs"]) + 1)]:
-            for q in (p, p[:-6] + ".log", p[:-6] + "_hmd.jsonl", p[:-6] + "_calib.json", p[:-6] + ".replay"):
+            for q in (p, p[:-6] + ".log", p[:-6] + "_hmd.jsonl", p[:-6] + "_calib.json", p[:-6] + ".replay",
+                      p[:-6] + "_poses2d.bin"):
                 try:
                     os.remove(q)
                 except OSError:
