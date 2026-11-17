@@ -72,6 +72,12 @@ PARENT = {
 ORDER = ["hip"] + [n for n in PARENT]  # parents always before children
 _CHAIN = [(IDX[c], IDX[PARENT[c]]) for c in ORDER[1:]]
 
+# Links that are not one rigid bone, as (shortest, longest) share of the learned length.
+# hip->neck is the whole spine: sitting on the floor it measured 0.41-0.44 m against 0.60 m
+# standing, and holding it at 0.60 pushed the neck and head 12-15 cm up, so the link to the
+# headset learned a wrong scale (ARCHITECTURE.md §29). The neck bends as well.
+FLEXIBLE = {IDX["neck"]: (0.6, 1.05), IDX["head"]: (0.7, 1.3), IDX["nose"]: (0.7, 1.3)}
+
 
 class SkeletonFit:
     def __init__(self, learn_frames: int = 90, symmetric: bool = True):
@@ -149,6 +155,9 @@ class SkeletonFit:
                     continue
                 d = P[c] - P[p]
                 n = np.linalg.norm(d)
+                if c in FLEXIBLE:
+                    lo, hi = FLEXIBLE[c]
+                    L = min(max(n, lo * L), hi * L)
                 out[c] = out[p] + (d / n * L if n > 1e-6 else d)
             P = out
         self.last = P

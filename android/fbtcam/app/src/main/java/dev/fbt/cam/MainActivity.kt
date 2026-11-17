@@ -204,6 +204,7 @@ class MainActivity : Activity() {
             onFrame = { d, pts, key -> server?.sendFrame(d, pts, key) },
             log = ::log).also {
             it.clockNs = { server?.phoneClockNs() ?: System.nanoTime() }
+            it.gravity = { gravity.direction() }
             try { it.start() } catch (e: Exception) { log("не вдалося запустити: $e") }
         }
     }
@@ -229,6 +230,7 @@ class MainActivity : Activity() {
                 val fps = s.sentFrames - lastFrames
                 val kbps = (s.sentBytes - lastBytes) * 8 / 1000
                 lastFrames = s.sentFrames; lastBytes = s.sentBytes
+                st?.onGravityTick()
                 val enc = st?.encodedFrames ?: 0
                 android.util.Log.i("FBTCAM", "stats encoded/s=${enc - lastEnc} sent/s=$fps kbps=$kbps dropped=${s.dropped} capture->encoded=${st?.medianEncodeLatencyMs()?.let { "%.0f".format(it) } ?: "-"}ms")
                 lastEnc = enc

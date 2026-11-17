@@ -40,6 +40,24 @@ class GravityMeter(ctx: Context) : SensorEventListener {
 
     /** {"v": [x, y, z] mean m/s², "sd_deg": spread of directions, "n": samples}, or null. */
     fun json(): JSONObject? {
+        val r = stats() ?: return null
+        return JSONObject().apply {
+            put("v", JSONArray(listOf(r[0], r[1], r[2])))
+            put("sd_deg", r[3])
+            put("n", r[4].toInt())
+        }
+    }
+
+    /** Unit direction of gravity (device axes) and the spread of the last 2 s in degrees,
+     *  or null: tells the camera whether the phone was turned (CameraStreamer.onGravityTick). */
+    fun direction(): Pair<DoubleArray, Double>? {
+        val r = stats() ?: return null
+        val m = sqrt(r[0] * r[0] + r[1] * r[1] + r[2] * r[2])
+        return doubleArrayOf(r[0] / m, r[1] / m, r[2] / m) to r[3]
+    }
+
+    /** mean x, y, z (m/s²), spread (deg), samples; or null */
+    private fun stats(): DoubleArray? {
         val s = synchronized(samples) { samples.toList() }
         if (s.size < 10) return null
         var x = 0.0; var y = 0.0; var z = 0.0
@@ -54,10 +72,6 @@ class GravityMeter(ctx: Context) : SensorEventListener {
             val a = Math.toDegrees(acos(c))
             sum += a * a
         }
-        return JSONObject().apply {
-            put("v", JSONArray(listOf(x, y, z)))
-            put("sd_deg", sqrt(sum / s.size))
-            put("n", s.size)
-        }
+        return doubleArrayOf(x, y, z, sqrt(sum / s.size), s.size.toDouble())
     }
 }

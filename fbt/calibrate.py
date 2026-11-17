@@ -174,32 +174,23 @@ def _angle(a, b) -> float:
     return float(np.degrees(np.arccos(np.clip(np.dot(a, b), -1.0, 1.0))))
 
 
-def choose_up(posture: np.ndarray, phones: list, log=print, agree_deg: float = 3.0) -> tuple:
-    """The vertical of the world frame. The phones' accelerometers measure it physically
-    (factory calibrated; ~1-2 deg each in the worst case, mostly the camera module sitting a
-    little skewed to the accelerometer), so with both phones agreeing their mean is used.
-    The posture estimate (upright_direction) is the fallback and the cross-check.
+def choose_up(posture: np.ndarray, phones: list, log=print) -> tuple:
+    """The vertical of the world frame: the standing posture (upright_direction).
+    The phones' accelerometers are only logged next to it. Measured against the headset, their
+    camera modules sit skewed to the accelerometer (Galaxy 1.2 deg, Redmi 4.4 deg), and on
+    17.11 two phones agreeing within 1.9 deg were still 2.4 deg off together: the feet stood
+    5-6 cm to one side of the head. With the posture's vertical: 1-2 cm (ARCHITECTURE.md §31).
     phones: up vectors in the same frame as posture, None where unknown."""
     g = [p for p in phones if p is not None]
     info = {"posture_vs_phones_deg": None, "phones_deg": None}
     if len(g) == 2:
         info["phones_deg"] = round(_angle(g[0], g[1]), 2)
-        if info["phones_deg"] <= agree_deg:
-            up = g[0] + g[1]
-            up /= np.linalg.norm(up)
-            info["posture_vs_phones_deg"] = round(_angle(up, posture), 2)
-            log(f"  vertical: phones' accelerometers (they agree within {info['phones_deg']:.1f}°, "
-                f"standing posture is {info['posture_vs_phones_deg']:.1f}° off)")
-            return up, {"source": "phones", **info}
-        log(f"  vertical: phones disagree by {info['phones_deg']:.1f}°, using the standing posture")
-    elif len(g) == 1:
-        info["posture_vs_phones_deg"] = round(_angle(g[0], posture), 2)
-        if info["posture_vs_phones_deg"] <= agree_deg:
-            log(f"  vertical: one phone's accelerometer (posture {info['posture_vs_phones_deg']:.1f}° off)")
-            return g[0].copy(), {"source": "one phone", **info}
-        log(f"  vertical: one phone only and {info['posture_vs_phones_deg']:.1f}° off the posture, using the posture")
+    if g:
+        mean = np.sum(g, axis=0)
+        info["posture_vs_phones_deg"] = round(_angle(mean / np.linalg.norm(mean), posture), 2)
+        log(f"  vertical: standing posture (phones' accelerometers {info['posture_vs_phones_deg']:.1f}° off it, for reference)")
     else:
-        log("  vertical: standing posture (no accelerometer data from the phones)")
+        log("  vertical: standing posture")
     return posture, {"source": "posture", **info}
 
 

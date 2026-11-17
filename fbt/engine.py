@@ -1002,10 +1002,13 @@ class Engine:
             time.sleep(0.05)
 
     def _calibrate(self, seconds: float):
-        slots = [s for s in self.slots if s.online]
-        recorders = []
+        slots, recorders = [], []
         try:
             self._wait_until(self.calib["t_start"])
+            # The cameras online when the recording starts, not when the button was pressed: right
+            # after the app starts the Mac camera takes a few seconds, and on 17.11 it was left out
+            # of a whole calibration that way while it already showed a picture.
+            slots = [s for s in self.slots if s.online]
             out_dir = time.strftime(f"{self.d}/rec_%Y%m%d_%H%M%S")
             os.makedirs(out_dir, exist_ok=True)
             for s in slots:
@@ -1080,6 +1083,10 @@ class Engine:
                 cams.append(cam)
                 hosts.append(self.slots[i].host)
                 meta["extra"][f"cam{i}"] = m
+            # A Mac camera that is on in the settings but recorded nothing must not go unnoticed.
+            if self.settings["use_mac"] and result["mac_error"] is None and any(
+                    f"cam{s.index}" not in meta["extra"] for s in self.slots[2:]):
+                result["mac_error"] = "камера ще вмикалась, тож її немає в калібровці — повтори, щоб вона теж допомагала"
                 result["mac"] = {"px": m["reproj_median_px"]}
             meta.update({"recording": out_dir, "height_m": float(self.settings["height_m"]), "source": "app (live poses)"})
             if os.path.exists(self.calib_path):

@@ -67,6 +67,10 @@ class CameraStreamer(
     @Volatile private var iso = 0
     @Volatile private var held = false
     private val metered = ArrayDeque<Pair<Long, Double>>()   // (time ms, exposure ns x ISO) while metering
+    /** Gravity direction (unit, device axes) and its spread over 2 s (deg), from MainActivity. */
+    @Volatile var gravity: () -> Pair<DoubleArray, Double>? = { null }
+    private var meterDir: DoubleArray? = null        // which way the phone pointed when the light was metered
+    private var meterWhileMoving = false             // metered while being handled: meter again once still
     private var checkAt = 0L                         // when to check that the phone obeys the manual exposure
     private val chars by lazy { ctx.getSystemService(CameraManager::class.java).getCameraCharacteristics(cfg.cam.id) }
     private val captureCb = object : CameraCaptureSession.CaptureCallback() {
@@ -190,7 +194,9 @@ class CameraStreamer(
      * exposures that smear fast legs. So it meters for ~3 s, then the exposure is held:
      * the same brightness (exposure x ISO) but at most 10 / 20 / 30 ms (multiples of the
      * 10 ms flicker of 50 Hz lights, so lamps do not band), and white balance held too.
-     * The Mac asks for a fresh metering at the start of a calibration or a game (remeter()).
+     * It meters again when the phone was turned (the view changed, onGravityTick) and when the
+     * Mac asks, at the start of a calibration or a game (remeter()). Someone walking around does
+     * not change the room's light, so nothing else does (ARCHITECTURE.md §30).
      */
     private fun lockExposure() {
         val d = device ?: return
@@ -201,6 +207,9 @@ class CameraStreamer(
         val light = metered.map { it.second }.sorted()[metered.size / 2]
         metered.clear()
         held = true
+        val g = gravity()
+        meterDir = g?.first
+        meterWhileMoving = g == null || g.second >= STILL_DEG
         val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: IntArray(0)
         val aeModes = chars.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_MODES) ?: IntArray(0)
         val keys = chars.availableCaptureRequestKeys
@@ -232,13 +241,36 @@ class CameraStreamer(
 
     /** Meter the light again (the Mac sends EXPOSURE when a calibration or a game starts). */
     fun remeter() {
+        handler.post { meterAgain() }
+    }
+
+    private fun meterAgain() {
+        val d = device ?: return
+        val s = session ?: return
+        manualExp = null; aeLock = false; held = false
+        metered.clear()
+        meterSince = SystemClock.elapsedRealtime()
+        try { applyRequest(d, s) } catch (e: Exception) { log("remeter failed: $e") }
+    }
+
+    /**
+     * Once a second: was the phone turned since the light was metered? Then the camera sees
+     * another view (put on its stand after starting in the hand: the ceiling lamps it saw made
+     * the picture 1.5x too dark), so it meters again once the phone stands still. Still phones
+     * wander < 0.1 deg (measured), so 2 deg is a real turn, not someone walking by.
+     */
+    fun onGravityTick() {
         handler.post {
-            val d = device ?: return@post
-            val s = session ?: return@post
-            manualExp = null; aeLock = false; held = false
-            metered.clear()
-            meterSince = SystemClock.elapsedRealtime()
-            try { applyRequest(d, s) } catch (e: Exception) { log("remeter failed: $e") }
+            if (!held) return@post
+            val (dir, sd) = gravity() ?: return@post
+            if (sd >= STILL_DEG) return@post                      // still being handled: wait
+            val ref = meterDir
+            val turned = ref == null || Math.toDegrees(kotlin.math.acos(
+                (dir[0] * ref[0] + dir[1] * ref[1] + dir[2] * ref[2]).coerceIn(-1.0, 1.0))) > TURNED_DEG
+            if (meterWhileMoving || turned) {
+                log("camera moved: metering the light again")
+                meterAgain()
+            }
         }
     }
 
@@ -292,5 +324,10 @@ class CameraStreamer(
             try { encoderSurface?.release() } catch (_: Exception) {}
             thread.quitSafely()
         }
+    }
+
+    private companion object {
+        const val STILL_DEG = 0.5       // spread of gravity over 2 s below this: the phone stands still
+        const val TURNED_DEG = 2.0      // pointing this much elsewhere than when metered: a new view
     }
 }

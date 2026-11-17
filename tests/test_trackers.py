@@ -59,6 +59,27 @@ def test_skeleton_fit_restores_bone_lengths():
     assert shin == pytest.approx(0.42, abs=0.02)
 
 
+def test_skeleton_fit_lets_the_spine_bend():
+    """Sitting on the floor the spine is a third shorter: kept as measured, not stretched
+    back to the standing length (that pushed the head 12-15 cm up, §29). Legs stay rigid."""
+    J = skeleton_from_state(BodyState())
+    fit = SkeletonFit(learn_frames=1)
+    valid = np.ones(26, bool)
+    fit(J, valid)
+    L = np.linalg.norm(J[IDX["neck"]] - J[IDX["hip"]])
+    slouch = J.copy()
+    upper = [IDX[n] for n in ("neck", "left_shoulder", "right_shoulder", "head", "nose", "left_eye", "right_eye",
+                              "left_ear", "right_ear", "left_elbow", "right_elbow", "left_wrist", "right_wrist")]
+    slouch[upper] -= np.array([0, 0.3 * L, 0])                # spine 30% shorter
+    out = fit(slouch, valid)
+    assert np.linalg.norm(out[IDX["neck"]] - out[IDX["hip"]]) == pytest.approx(0.7 * L, abs=0.005)
+    assert np.allclose(out[IDX["head"]], slouch[IDX["head"]], atol=1e-6)
+    squash = J.copy()
+    squash[upper] -= np.array([0, 0.6 * L, 0])                # impossible: held at 60%
+    out = fit(squash, valid)
+    assert np.linalg.norm(out[IDX["neck"]] - out[IDX["hip"]]) == pytest.approx(0.6 * L, abs=0.005)
+
+
 def test_skeleton_fit_fills_missing_joint():
     J = skeleton_from_state(BodyState())
     fit = SkeletonFit(learn_frames=1)

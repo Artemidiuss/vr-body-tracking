@@ -100,22 +100,22 @@ def test_gravity_mapping_portrait_phone():
     assert gravity_up_in_camera(t) is None
 
 
-def test_vertical_follows_the_phones_accelerometers():
-    """With gravity from both phones the world's up is the measured one, not the posture's:
-    tilt the 'true' vertical by 3 deg and the calibration must follow it."""
+def test_vertical_is_the_posture_not_the_phones():
+    """Phones agreeing on a vertical 3 deg off (camera modules skewed to the accelerometer)
+    do not tilt the world: the standing posture sets it, the phones are only logged (§31)."""
     cams = ring_of_cameras([-40, 40], distance=1.2, vfov_deg=96)
     f_px = cams[0].K[0, 0]
     frames = [(t, J) for t, J, _ in motion_sequence(["walk", "squat", "side_step", "kick"], seconds_each=3)]
     noise = NoiseModel(pixel_sigma=2.0, lr_swap_front=0, lr_swap_back=0, dropout=0.02, seed=1)
     fmm = f_px * 3.67 / 1280
-    for tilt in (0.0, 3.0):
-        a_ = np.radians(tilt)
-        up = (np.sin(a_), np.cos(a_), 0.0)
-        a = _with_gravity(_track(cams[0], frames, noise, 3.67, fmm), cams[0], up)
-        b = _with_gravity(_track(cams[1], frames, noise, 3.67, fmm), cams[1], up)
-        est, meta = calibrate_pair(a, b, height_m=1.75, log=lambda *_: None)
-        assert meta["up"]["source"] == "phones"
-        for e, c in zip(est, cams):
-            want = c.R @ np.asarray(up)                 # measured vertical, in camera axes
-            got = e.R @ np.array([0.0, 1.0, 0.0])       # calibrated world up, in camera axes
-            assert np.degrees(np.arccos(np.clip(want @ got, -1, 1))) < 0.3
+    a_ = np.radians(3.0)
+    skewed = (np.sin(a_), np.cos(a_), 0.0)
+    a = _with_gravity(_track(cams[0], frames, noise, 3.67, fmm), cams[0], skewed)
+    b = _with_gravity(_track(cams[1], frames, noise, 3.67, fmm), cams[1], skewed)
+    est, meta = calibrate_pair(a, b, height_m=1.75, log=lambda *_: None)
+    assert meta["up"]["source"] == "posture"
+    assert abs(meta["up"]["posture_vs_phones_deg"] - 3.0) < 1.0
+    for e, c in zip(est, cams):
+        want = c.R @ np.array([0.0, 1.0, 0.0])          # the true vertical, in camera axes
+        got = e.R @ np.array([0.0, 1.0, 0.0])
+        assert np.degrees(np.arccos(np.clip(want @ got, -1, 1))) < 1.5   # the posture's own ~1 deg
