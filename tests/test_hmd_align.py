@@ -107,3 +107,46 @@ def test_a_fit_started_before_a_tpose_is_dropped():
     finally:
         mod.least_squares = real_lsq
     assert np.allclose(al.target, x_reset)
+
+
+def _still(al, link, t_from, seconds, rng, hmd_rate=25, x0=0.3, move=0.0):
+    """Sitting still (or one fast move of `move` m), the headset seen through `link`; headset
+    samples go to headset_sample as they arrive, camera frames to add."""
+    yaw, t0, d = link
+    poses = {}
+    for i in range(int(seconds * hmd_rate)):
+        t = t_from + i / hmd_rate
+        q = np.array([x0 + move * min(1.0, max(0.0, (t - t_from - 1.0) * 10)), 0.6, 0.2])
+        e = np.array([20.0, 40.0 + (yaw - 170.0) + 5 * np.sin(t), 0.0])   # the space turns the headset too
+        p = Ry(np.radians(yaw)) @ q + t0 + unity_R(e) @ d
+        poses[t] = (p, e)
+        al.headset_sample(t, p, e)
+        tc = t - al.LAG - 0.2                                 # the camera frame of that moment, 0.2 s late
+        if tc >= t_from:
+            al.add(tc, q + rng.normal(0, 0.005, 3), lambda tq: min(poses.items(), key=lambda kv: abs(kv[0] - tq))[1])
+    return poses
+
+
+def test_follows_a_recenter_at_once():
+    """Lying still, the Quest recentres by itself (game 19.11 23:23, three times): the head lands
+    at the origin facing 0 in one sample. The link follows within a fraction of a second, with
+    no walking and no T-pose; a fast real move of the head is not mistaken for one."""
+    rng = np.random.default_rng(2)
+    d = np.array([0.0, 0.06, 0.09])
+    link = (170.0, np.array([0.2, 0.05, -0.05]), d)
+    al = HmdAlign()
+    al.x = np.r_[np.radians(link[0]), link[1], 0.0, d]
+    al.target, al.ready, al.worn = al.x.copy(), True, True
+    _still(al, link, 0.0, 3, rng, move=0.25)                  # 25 cm in 0.1 s: a head can do that
+    assert al.space_jumps == 0
+    q = np.array([0.55, 0.6, 0.2])
+    yaw = np.radians(link[0])
+    # recentre: the new space has the head root at the origin, yaw 0 -> rotate by -(170 + 40) deg
+    a = -np.radians(170.0 + 40.0)
+    root_old = Ry(yaw) @ q + link[1]
+    new_t0 = Ry(a) @ link[1] - Ry(a) @ root_old * np.array([1, 0, 1])
+    new = (np.degrees(yaw + a), new_t0, d)
+    _still(al, new, 3.0, 2, rng, x0=0.55)
+    assert al.space_jumps == 1
+    assert abs((al.yaw_deg() - new[0] + 180) % 360 - 180) < 3.0
+    assert np.linalg.norm(al.x[1:4] - new_t0) < 0.03

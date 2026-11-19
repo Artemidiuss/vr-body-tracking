@@ -144,6 +144,7 @@ class HeadsetPose:
         self._n_start = 0
         self.logf = None
         self._t_rx = 0.0
+        self.on_head = None                                # f(t, position, euler) per head pose
         self._quit = threading.Event()
         threading.Thread(target=self._run, daemon=True, name="hmd").start()
 
@@ -190,6 +191,11 @@ class HeadsetPose:
                 self.head.append((t, *map(float, args[:6])))
                 self.n += 1
             f = self.logf
+        if addr.endswith("head/pose") and self.on_head is not None:
+            try:
+                self.on_head(t, [float(x) for x in args[:3]], [float(x) for x in args[3:6]])
+            except Exception as e:              # must not stop the headset stream
+                print(f"hmd: on_head failed: {e!r}", flush=True)
         if f is not None:
             try:
                 f.write(json.dumps({"t": t, "a": addr.split("/")[3], "v": [round(float(x), 5) for x in args[:6]]}) + "\n")
@@ -640,6 +646,7 @@ class Engine:
         self.hmd = HeadsetPose(lambda: self.settings.get("quest_ip"), lambda: bool(self.headset_online))
         from .hmd_align import HmdAlign
         self.align = HmdAlign()
+        self.hmd.on_head = lambda t, p, e: self.align.headset_sample(t, p, e)   # whichever link is current
         threading.Thread(target=self._align_loop, daemon=True, name="align").start()
         for fn in (self._track_loop, self._monitor_loop, self._ping_loop):
             threading.Thread(target=fn, daemon=True, name=fn.__name__).start()

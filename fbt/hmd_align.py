@@ -66,6 +66,9 @@ class HmdAlign:
         self._recent = collections.deque()
         self._resets = 0                      # T-pose resets so far (a fit started before one is dropped)
         self._on_since = self._off_since = None
+        self._last_h = None                   # previous headset sample (t, p, R)
+        self._jump = None                     # a space jump waiting for the cameras' word
+        self.space_jumps = 0
         self.lock = threading.Lock()
 
     # ---------------- data
@@ -94,6 +97,8 @@ class HmdAlign:
         p, e = np.asarray(h[0], float), np.asarray(h[1], float)
         R = unity_R(e)
         with self.lock:
+            if self._jump is not None and self.x is not None:
+                self._judge_jump(t_cap + self.LAG, q, p, R)
             root = p - R @ (self.x[5:8] if self.x is not None else self.D0)
             mq, mp = self._motion(t_cap, q, root)
             r = None if self.x is None else float(np.linalg.norm(self.predict_hmd(q, R) - p))
@@ -125,6 +130,68 @@ class HmdAlign:
             self.pairs.append((t_cap, q, p, R))
             while self.pairs and t_cap - self.pairs[0][0] > self.WINDOW:
                 self.pairs.popleft()
+
+    # ---------------- VRChat's space jumps (a Quest recenter)
+    JUMP_M = 0.12        # head root step between two samples <= 0.1 s apart that no head makes
+
+    def headset_sample(self, t: float, p, euler) -> None:
+        """Every headset pose as it arrives. A Quest recenter (by hand, or by the headset itself:
+        lying down) moves VRChat's tracking space in one sample: the head lands at the origin
+        facing yaw 0 while the body did not move. The link then sends every tracker 20-60 cm
+        off (game 19.11 23:23: three times, until a T-pose; ARCHITECTURE §44). Two samples in a
+        row whose head roots are > JUMP_M apart (playing: < 10 cm, 8 h of logs; the jumps 19-62)
+        give the move of the space; the cameras confirm it (add) before the link follows."""
+        p = np.asarray(p, float)
+        R = unity_R(euler)
+        with self.lock:
+            last, self._last_h = self._last_h, (t, p, R)
+            if last is None or self.x is None or t - last[0] > 0.1:
+                return
+            d = self.x[5:8]
+            r1, r2 = last[1] - last[2] @ d, p - R @ d
+            if np.linalg.norm(r2 - r1) < self.JUMP_M:
+                return
+            M = R @ last[2].T                          # the head itself barely turns in 0.1 s
+            a = float(np.arctan2(M[0, 2] - M[2, 0], M[0, 0] + M[2, 2]))
+            self._jump = (t, a, r2 - Ry(a) @ r1, [])
+
+    def _judge_jump(self, t_h, q, p, R):
+        """Our head vs the headset after a candidate jump: the link as it is, and moved with the
+        jump. Three camera frames: the moved link far better -> the space moved; the link as it
+        is still fine -> it was the head (a fast move)."""
+        t_j, a, c, votes = self._jump
+        if t_h < t_j:
+            return
+        if t_h - t_j > 1.5:
+            self._jump = None
+            return
+        moved = self.x.copy()
+        moved[0] += a
+        moved[1:4] = Ry(a) @ self.x[1:4] + c
+        _, _, s, d = self._unpack(self.x)
+        old = np.linalg.norm(s * (Ry(self.x[0]) @ q) + self.x[1:4] + R @ d - p)
+        new = np.linalg.norm(s * (Ry(moved[0]) @ q) + moved[1:4] + R @ d - p)
+        votes.append((old, new))
+        if len(votes) < 3:
+            return
+        old, new = np.median(votes, axis=0)
+        self._jump = None
+        if old > 0.10 and new < 0.5 * old:
+            self._move_space(a, c)
+
+    def _move_space(self, a, c):
+        """Everything kept in VRChat's old space, re-expressed in the new one (lock held)."""
+        Ra = Ry(a)
+        for x in (self.x, self.target):
+            if x is not None:
+                x[1:4] = Ra @ x[1:4] + c
+                x[0] += a
+        self.pairs = collections.deque((t, q, Ra @ p + c, Ra @ R) for t, q, p, R in self.pairs)
+        self._recent = collections.deque((t, q, Ra @ r + c) for t, q, r in self._recent)
+        self._bad_since, self.lost = None, False
+        self.space_jumps += 1
+        print(f"align: VRChat's space moved ({np.degrees(a):+.0f} deg, {np.linalg.norm(c) * 100:.0f} cm),"
+              f" the link follows", flush=True)
 
     # ---------------- model
     def _unpack(self, x):
