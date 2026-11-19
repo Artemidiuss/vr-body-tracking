@@ -185,3 +185,28 @@ def test_motion_predictor_quiet_at_rest_and_leads_in_motion():
     for i in range(30):
         out = p(base + [i * 0.03, 0, 0], i / 30)               # 0.9 m/s
     assert out[0, 0] - 29 * 0.03 > 0.04                        # leads by ~7 cm (clamped at 5)
+
+
+def test_knee_of_a_straight_leg_stretched_forward_does_not_spin():
+    """Sitting with a straight leg stretched forward (or lying, leg raised): the thigh points
+    along the body's facing. The knee tracker must stay put (kneecap up) under 3 mm of noise;
+    standing, the knee still faces the body's forward."""
+    from fbt.hmd_align import unity_R
+    J = skeleton_from_state(BodyState())
+    knee = lambda P: unity_R({t.id: t for t in solve(P, enabled=("left_knee",))}["5"].rotation)
+    fwd_stand = knee(J)[:, 2]
+    hip_rot = unity_R({t.id: t for t in solve(J, enabled=("hip",))}["1"].rotation)
+    assert np.dot(fwd_stand, hip_rot[:, 2]) > 0.98                    # standing: unchanged
+    S = J.copy()
+    h = S[IDX["left_hip"]]
+    S[IDX["left_knee"]] = h + [0, 0, 0.42]                          # body faces world +Z
+    S[IDX["left_ankle"]] = h + [0, 0, 0.84]
+    rng = np.random.default_rng(0)
+    fw = []
+    for _ in range(50):
+        P = S.copy()
+        P[[IDX["left_hip"], IDX["left_knee"], IDX["left_ankle"]]] += rng.normal(0, 0.003, (3, 3))
+        fw.append(knee(P)[:, 2])
+    fw = np.array(fw)
+    assert np.all(fw[:, 1] > 0.95)                                   # kneecap up (Unity y)
+    assert np.degrees(np.arccos(np.clip(fw @ fw.mean(0) / np.linalg.norm(fw.mean(0)), -1, 1))).max() < 15

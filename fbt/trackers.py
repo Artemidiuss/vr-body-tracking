@@ -174,11 +174,16 @@ def solve(P_world: np.ndarray, enabled=("hip", "chest", "left_foot", "right_foot
         Rf = frame_fwd(foot_fwd, shin_up) if foot_mode == "exact" else frame(shin_up, foot_fwd)
         add(f"{side}_foot", g(f"{side}_ankle"), Rf)
         thigh = g(f"{side}_hip") - g(f"{side}_knee")
-        # Knee forward: the bend direction when clearly bent, else the body's
-        # facing (a straight leg has no stable bend direction).
+        # Knee forward: the bend direction when clearly bent; for a straight leg the
+        # kneecap direction, perpendicular to the thigh in the plane the hip flexes in
+        # (hip axis x thigh). Standing that is the body's facing, as before; the facing
+        # itself was used until 2026-11-19 and is parallel to the thigh of a straight leg
+        # stretched forward sitting or raised lying, so the knee tracker spun there
+        # (35 jumps > 20 deg per 1000 frames, now 15; ARCHITECTURE.md §37).
         bis = (g(f"{side}_knee") - g(f"{side}_hip")) + (g(f"{side}_knee") - g(f"{side}_ankle"))
         bend = np.linalg.norm(bis)
-        knee_fwd = _n(fwd) * max(0.0, 1 - bend / 0.15) + _n(bis) * min(1.0, bend / 0.15)
+        straight_fwd = np.cross(right, thigh)
+        knee_fwd = _n(straight_fwd) * max(0.0, 1 - bend / 0.15) + _n(bis) * min(1.0, bend / 0.15)
         add(f"{side}_knee", g(f"{side}_knee"), frame(thigh, knee_fwd))
         upper = g(f"{side}_shoulder") - g(f"{side}_elbow")
         bis = (g(f"{side}_elbow") - g(f"{side}_shoulder")) + (g(f"{side}_elbow") - g(f"{side}_wrist"))
