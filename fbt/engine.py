@@ -30,7 +30,7 @@ from .poselog import FRAME3D, NO_PAIR, NO_TORSO, PoseLog
 from .skeleton import IDX
 from .system import KeepAwake, battery, ping, say
 from .trackers import head_tracker, is_tpose, solve, to_unity
-from .triangulate import triangulate_with_swap_check, view_thresholds, view_weights
+from .triangulate import extra_cap, triangulate_with_swap_check, view_thresholds, view_weights
 
 CORE = [IDX[k] for k in ("hip", "left_hip", "right_hip", "neck")]
 DEFAULTS = {
@@ -604,6 +604,8 @@ class Engine:
         self.settings = self._load_settings()
         if cameras:
             self.settings["cameras"] = list(cameras)
+        if len(self.cams) >= 2:              # the third camera's weight depends on its rate (a setting)
+            self.view_w = view_weights(self.cams, cap=extra_cap(self.settings["extra_fps"]))
         self.mode = "setup"
         self.calib: dict = {"state": "idle"}
         self._cancel = threading.Event()
@@ -669,7 +671,8 @@ class Engine:
         with self.lock:
             self.cams, self.calib_hosts, self.calib_meta, self.calib_time = cams, hosts, meta, when
             self.view_thr = view_thresholds(cams) if len(cams) >= 2 else None
-            self.view_w = view_weights(cams) if len(cams) >= 2 else None
+            fps = getattr(self, "settings", DEFAULTS)["extra_fps"]     # at start-up settings come after this
+            self.view_w = view_weights(cams, cap=extra_cap(fps)) if len(cams) >= 2 else None
             for s in getattr(self, "slots", []):
                 s.t_offset = cams[s.index].time_offset if s.index < len(cams) else 0.0
             self._reset_3d = True
@@ -701,6 +704,9 @@ class Engine:
             self._make_slots()
         for sl in self.slots[2:]:
             sl.max_rate = float(self.settings["extra_fps"])
+        if "extra_fps" in new and len(self.cams) >= 2:     # its weight depends on its rate
+            with self.lock:
+                self.view_w = view_weights(self.cams, cap=extra_cap(self.settings["extra_fps"]))
         if self.out is not None and "quest_ip" in new:
             self.out.sender = VRChatSender(self.settings["quest_ip"], 9000)
         return self.settings

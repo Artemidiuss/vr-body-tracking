@@ -78,6 +78,16 @@ _CHAIN = [(IDX[c], IDX[PARENT[c]]) for c in ORDER[1:]]
 # headset learned a wrong scale (ARCHITECTURE.md §29). The neck bends as well.
 FLEXIBLE = {IDX["neck"]: (0.6, 1.05), IDX["head"]: (0.7, 1.3), IDX["nose"]: (0.7, 1.3)}
 
+# The legs hang from where their ankles are, not from the pelvis keypoint: the model puts that
+# keypoint 2-4.5 cm high in a T-pose (the thigh 41 cm instead of 38.6) and too far from the knee
+# lying with knees bent (43 instead of 38), while the ankles stay put. Hanging the legs from it
+# raised the feet in the T-pose VRChat calibrates in, so they sank afterwards (1.3-3.8 cm in our
+# games), and lowered them lying (up to 4 cm). Now the pelvis moves by what the two legs say
+# (their bones, as now, ending at the ankles), smoothed over FEET_TAU: the error follows the pose,
+# keypoint noise is fast, and unsmoothed the hip tracker shook 17-33% more (ARCHITECTURE §40).
+LEGS = [(IDX[f"{s}_hip"], IDX[f"{s}_knee"], IDX[f"{s}_ankle"]) for s in ("left", "right")]
+FEET_TAU = 0.5
+
 
 class SkeletonFit:
     def __init__(self, learn_frames: int = 90, symmetric: bool = True):
@@ -86,6 +96,8 @@ class SkeletonFit:
         self.samples: list[np.ndarray] = []
         self.lengths: np.ndarray | None = None   # per child index
         self.last: np.ndarray | None = None
+        self.pelvis_shift: np.ndarray | None = None   # smoothed pelvis correction from the legs
+        self._shift_t = None
 
     @property
     def ready(self) -> bool:
@@ -136,8 +148,27 @@ class SkeletonFit:
                         med[IDX[n]] = med[r] = m
             self.lengths = med
 
-    def __call__(self, P: np.ndarray, valid: np.ndarray) -> np.ndarray:
-        """Returns a complete (26,3) skeleton."""
+    def _shift(self, P: np.ndarray, t: float | None) -> np.ndarray:
+        """How far to move the pelvis so the legs, at their learned lengths and measured
+        directions, end at the ankles (mean of both legs), smoothed over FEET_TAU."""
+        L = self.lengths
+        hip = IDX["hip"]
+        if not all(np.isfinite(L[[hl, kn, an]]).all() for hl, kn, an in LEGS):
+            return np.zeros(3)
+        unit = lambda v: v / max(np.linalg.norm(v), 1e-6)
+        d = np.mean([P[an] + unit(P[kn] - P[an]) * L[an] + unit(P[hl] - P[kn]) * L[kn]
+                     - (P[hip] + unit(P[hl] - P[hip]) * L[hl]) for hl, kn, an in LEGS], axis=0)
+        if t is None:
+            return d
+        if self.pelvis_shift is None or self._shift_t is None or not 0 <= t - self._shift_t <= 0.3:
+            self.pelvis_shift = d                       # first frame or after a gap: start afresh
+        else:
+            self.pelvis_shift = self.pelvis_shift + (1 - np.exp(-(t - self._shift_t) / FEET_TAU)) * (d - self.pelvis_shift)
+        self._shift_t = t
+        return self.pelvis_shift
+
+    def __call__(self, P: np.ndarray, valid: np.ndarray, t: float | None = None) -> np.ndarray:
+        """Returns a complete (26,3) skeleton. t (seconds) smooths the pelvis correction."""
         P = P.copy()
         if self.last is not None:
             # Fill joints we could not triangulate: keep their offset from the parent.
@@ -148,12 +179,14 @@ class SkeletonFit:
             self._learn(P, valid)
         else:
             out = P.copy()
+            out[IDX["hip"]] = P[IDX["hip"]] + self._shift(P, t)
             for c, p in _CHAIN:
                 L = self.lengths[c]
+                # the spine reaches the neck where it was measured, from the moved pelvis
+                d = P[c] - out[p] if c == IDX["neck"] else P[c] - P[p]
                 if not np.isfinite(L):
-                    out[c] = out[p] + (P[c] - P[p])
+                    out[c] = out[p] + d
                     continue
-                d = P[c] - P[p]
                 n = np.linalg.norm(d)
                 if c in FLEXIBLE:
                     lo, hi = FLEXIBLE[c]
@@ -325,7 +358,7 @@ class SkeletonStabilizer:
     def __call__(self, P, valid, t):
         if self.gate is not None:
             P, valid = self.gate(P, valid, t)
-        full = self.fit(P, valid)
+        full = self.fit(P, valid, t)
         sm = self.euro(full.ravel(), t).reshape(-1, 3)
         if self.pred is not None:
             sm = self.pred(sm, t)

@@ -84,22 +84,34 @@ def triangulate_pose(cams: list[Camera], poses: list[Pose2D | None],
 
 
 EXTRA_MAX_WEIGHT = 0.27
+EXTRA_FULL_RATE = 25.0       # an extra camera at this pose rate or faster is not capped (below)
 
 
-def view_weights(cams: list[Camera], n_ref: int = 2) -> np.ndarray:
+def extra_cap(extra_fps: float) -> float:
+    """The weight cap for an extra camera running its pose at extra_fps.
+    At 30 fps a third phone joins as many 3D steps as its latency allows (67-90%), and its cap
+    only threw its view away: at the phone's weight, legs shook the same with it in the middle of
+    the room (game 05:02: standing 1.38 vs 1.44 m/s2) and less from a corner (game 20:20: 0.97 /
+    1.15 / 1.65 vs 1.09 / 1.37 / 2.16 standing / sitting / lying, bone spread 3.0 vs 3.8 cm).
+    At 15 fps the cap stays: there the full weight added shake (sitting +48%; ARCHITECTURE §37-38).
+    A long-focal camera (the MacBook, f_ref / f ~0.26) keeps its focal weight either way."""
+    return 1.0 if extra_fps >= EXTRA_FULL_RATE else EXTRA_MAX_WEIGHT
+
+
+def view_weights(cams: list[Camera], n_ref: int = 2, cap: float = EXTRA_MAX_WEIGHT) -> np.ndarray:
     """DLT weight multipliers: 1 for the first n_ref cameras (phones), f_ref / f
     for the others, so a long-focal camera does not outweigh the phones.
     Offline (held-out half of a recording): upper-body bone spread 1.68 -> 1.36 cm.
 
-    And at most EXTRA_MAX_WEIGHT: an extra camera runs its pose at a lower rate and
-    arrives later, so it joins only part of the 3D steps (~58% for a phone at 15 fps)
+    And at most `cap` (extra_cap(): EXTRA_MAX_WEIGHT below 25 fps): an extra camera at 15 fps
+    arrives later and rarer, so it joins only part of the 3D steps (~58% for a phone)
     and every join or leave moves the point. With a third phone at its focal weight
     (0.95) knees and hips shook 3x (standing 12.9 / 10.6 mm per frame vs 4.0 / 3.5
     from the phones alone); at 0.27, the MacBook's own weight, 4.3 / 3.5."""
     w = np.ones(len(cams))
     if len(cams) > n_ref:
         fref = np.mean([c.K[0, 0] for c in cams[:n_ref]])
-        w[n_ref:] = [min(fref / c.K[0, 0], EXTRA_MAX_WEIGHT) for c in cams[n_ref:]]
+        w[n_ref:] = [min(fref / c.K[0, 0], cap) for c in cams[n_ref:]]
     return w
 
 

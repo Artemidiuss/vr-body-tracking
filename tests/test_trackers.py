@@ -80,6 +80,26 @@ def test_skeleton_fit_lets_the_spine_bend():
     assert np.linalg.norm(out[IDX["neck"]] - out[IDX["hip"]]) == pytest.approx(0.6 * L, abs=0.005)
 
 
+def test_skeleton_fit_keeps_the_ankles_when_the_pelvis_keypoint_is_off():
+    """The model puts the pelvis keypoint high in a T-pose (thigh 41 cm instead of 38.6): the legs
+    keep their lengths and directions but end where the ankles were seen, and the pelvis moves
+    instead (it used to lift the feet, so they sank after VRChat's T-pose calibration, §40)."""
+    J = skeleton_from_state(BodyState())
+    fit = SkeletonFit(learn_frames=1)
+    valid = np.ones(26, bool)
+    fit(J, valid, 0.0)
+    high = J.copy()
+    pelvis = [IDX[n] for n in ("hip", "left_hip", "right_hip")]
+    high[pelvis] += np.array([0, 0.04, 0])                     # pelvis keypoints 4 cm up
+    for k in range(60):                                        # 2 s at 30 fps: past the smoothing
+        out = fit(high, valid, (k + 1) / 30)
+    for a in ("left_ankle", "right_ankle"):
+        assert np.linalg.norm(out[IDX[a]] - J[IDX[a]]) < 0.005
+    shin = np.linalg.norm(out[IDX["left_ankle"]] - out[IDX["left_knee"]])
+    assert shin == pytest.approx(np.linalg.norm(J[IDX["left_ankle"]] - J[IDX["left_knee"]]), abs=1e-6)
+    assert np.allclose(out[IDX["head"]], high[IDX["head"]], atol=1e-6)    # the head stays where seen
+
+
 def test_skeleton_fit_fills_missing_joint():
     J = skeleton_from_state(BodyState())
     fit = SkeletonFit(learn_frames=1)
