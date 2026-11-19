@@ -48,6 +48,16 @@ def intrinsics_from_info(info: dict, w: int, h: int) -> np.ndarray:
     return np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]])
 
 
+def phone_focal(info: dict, w: int, h: int) -> float | None:
+    """Focal px of a phone placed as an extra camera (calibrate_extra), taken as known.
+    Seen from one place, focal and distance trade off at the same error: free (or within
+    ±8%) the fit drifted 4–6% in focal, 8–13 cm in distance, on synthetic data; with the
+    phone's value the distance error follows the focal error only (0.3% on both phones)."""
+    if not info.get("focal_mm") or not info.get("sensor_mm"):
+        return None
+    return float(intrinsics_from_info(info, w, h)[0, 0])
+
+
 @dataclass
 class PoseTrack:
     """2D poses of one camera over a recording."""

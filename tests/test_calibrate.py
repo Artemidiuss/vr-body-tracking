@@ -119,3 +119,35 @@ def test_vertical_is_the_posture_not_the_phones():
         want = c.R @ np.array([0.0, 1.0, 0.0])          # the true vertical, in camera axes
         got = e.R @ np.array([0.0, 1.0, 0.0])
         assert np.degrees(np.arccos(np.clip(want @ got, -1, 1))) < 1.5   # the posture's own ~1 deg
+
+
+def test_phone_as_third_camera_uses_its_own_focal():
+    """A third phone (ultra-wide, portrait) in the middle, low, aimed at the hips and legs:
+    placed by PnP with the focal it reports itself (phone_focal)."""
+    from fbt.calibrate import calibrate_extra, phone_focal, triangulate_tracks
+    from fbt.camera import Camera
+
+    phones = ring_of_cameras([-40, 40], distance=1.6, vfov_deg=96)
+    third = Camera.look_at("third", (0.0, 0.6, -1.8), (0.0, 0.6, 0.0), vfov_deg=96, width=480, height=640)
+    frames = [(t, J) for t, J, _ in motion_sequence(["walk", "squat", "side_step", "turn"], seconds_each=3)]
+    noise = NoiseModel(pixel_sigma=2.0, lr_swap_front=0, lr_swap_back=0, dropout=0.02, seed=4)
+    a = _track(phones[0], frames, noise, 3.67, 2.0)
+    b = _track(phones[1], frames, noise, 3.67, 2.0)
+    f_true = third.K[0, 0]
+    m = _track(third, frames, NoiseModel(pixel_sigma=2.0, lr_swap_front=0, lr_swap_back=0, dropout=0.02, seed=5),
+               3.67, f_true * 3.67 / 640)
+    f = phone_focal(m.info, m.width, m.height)
+    assert abs(f / f_true - 1) < 1e-6
+    ts, skel = triangulate_tracks(phones, a, b)
+    est, meta = calibrate_extra(m, ts, skel, focal=f, log=lambda *_: None)
+    assert np.linalg.norm(est.center - third.center) < 0.03
+    # free focal drifts along the viewing axis at the same error: why the phone's value is used
+    est_free, meta_free = calibrate_extra(m, ts, skel, log=lambda *_: None)
+    assert np.linalg.norm(est_free.center - third.center) > np.linalg.norm(est.center - third.center)
+    assert abs(meta_free["reproj_median_px"] - meta["reproj_median_px"]) < 0.5
+
+
+def test_phone_focal_needs_the_phone_metadata():
+    from fbt.calibrate import phone_focal
+    assert phone_focal({"device": "MacBook"}, 1280, 720) is None
+    assert abs(phone_focal({"focal_mm": 1.65, "sensor_mm": [3.67, 2.75]}, 480, 640) - 287.74) < 0.01

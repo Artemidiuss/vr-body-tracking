@@ -83,14 +83,23 @@ def triangulate_pose(cams: list[Camera], poses: list[Pose2D | None],
     return Pose3D(pts, valid, err, nv, [False] * len(cams))
 
 
+EXTRA_MAX_WEIGHT = 0.27
+
+
 def view_weights(cams: list[Camera], n_ref: int = 2) -> np.ndarray:
     """DLT weight multipliers: 1 for the first n_ref cameras (phones), f_ref / f
     for the others, so a long-focal camera does not outweigh the phones.
-    Offline (held-out half of a recording): upper-body bone spread 1.68 -> 1.36 cm."""
+    Offline (held-out half of a recording): upper-body bone spread 1.68 -> 1.36 cm.
+
+    And at most EXTRA_MAX_WEIGHT: an extra camera runs its pose at a lower rate and
+    arrives later, so it joins only part of the 3D steps (~58% for a phone at 15 fps)
+    and every join or leave moves the point. With a third phone at its focal weight
+    (0.95) knees and hips shook 3x (standing 12.9 / 10.6 mm per frame vs 4.0 / 3.5
+    from the phones alone); at 0.27, the MacBook's own weight, 4.3 / 3.5."""
     w = np.ones(len(cams))
     if len(cams) > n_ref:
         fref = np.mean([c.K[0, 0] for c in cams[:n_ref]])
-        w[n_ref:] = [fref / c.K[0, 0] for c in cams[n_ref:]]
+        w[n_ref:] = [min(fref / c.K[0, 0], EXTRA_MAX_WEIGHT) for c in cams[n_ref:]]
     return w
 
 

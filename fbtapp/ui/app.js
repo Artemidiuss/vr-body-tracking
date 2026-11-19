@@ -28,8 +28,8 @@ function camOrder(st) {
   // Tiles in the order the user sees them standing in front of the table:
   // the phone on the user's left first, the MacBook in the middle.
   const n = st.cams.length, idx = [...Array(n).keys()];
-  const mac = idx.find(i => st.cams[i].mac);
-  const phones = idx.filter(i => !st.cams[i].mac);
+  const mac = idx.find(i => st.cams[i].extra);       // the third camera (MacBook or a phone) stands in the middle
+  const phones = idx.filter(i => !st.cams[i].extra);
   const P = st.cam_poses || [];
   if (mac !== undefined && P[mac] && P[0] && P[1] && P[mac].x) {
     const c = P[mac].c, x = P[mac].x;
@@ -149,7 +149,8 @@ function renderPanel() {
       p.innerHTML = `<div style="display:flex;align-items:center;gap:18px"><div class="spin"></div><div class="timer-text"><h3>Рахую калібрування…</h3><p>Кілька секунд</p></div></div>`;
     } else if (st === "done") {
       const r = cal.result || {};
-      const mac = r.mac ? `MacBook: ${r.mac.px.toFixed(1)} px` : r.mac_error ? `MacBook: ${esc(r.mac_error)}` : "";
+      const xn = esc(r.extra_name || "MacBook");
+      const mac = r.mac ? `${xn}: ${r.mac.px.toFixed(1)} px` : r.mac_error ? `${xn}: ${esc(r.mac_error)}` : "";
       p.innerHTML = `<div class="result"><h3><span class="good">✓</span> Готово</h3>
         <p class="q">Точність: <b>${esc(r.quality)}</b></p>
         <p>Телефони: ${r.phones_px.toFixed(1)} px · між ними ${r.baseline_m.toFixed(2)} м, кут ${Math.round(r.angle_deg)}°${mac ? "<br>" + mac : ""}</p></div>
@@ -203,7 +204,7 @@ function renderPanel() {
 }
 
 function renderGame() {
-  const t = S.tracking, phones = S.cams.filter(c => !c.mac);
+  const t = S.tracking, phones = S.cams.filter(c => !c.extra);
   const offPhones = phones.filter(c => c.state !== "online").map(c => c.name);
   let cls = "ok", text = "Працює", sub = "", subOk = false;
   if (offPhones.length) { cls = "bad"; text = "Камера відключилась"; sub = offPhones.join(", "); }

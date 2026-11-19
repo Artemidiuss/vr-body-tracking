@@ -20,8 +20,8 @@ import time
 import cv2
 import numpy as np
 
-from .calibrate import (PoseTrack, calibrate_extra, calibrate_pair, merge_gravity, load_calibration, save_calibration,
-                        triangulate_tracks)
+from .calibrate import (PoseTrack, calibrate_extra, calibrate_pair, merge_gravity, load_calibration, phone_focal,
+                        save_calibration, triangulate_tracks)
 from .filters import MotionPredictor, OneEuro, SkeletonFit, SkeletonStabilizer
 from .maccam import mac_focal_range, open_source
 from .osc_out import VRChatSender
@@ -79,6 +79,8 @@ def friendly_name(host: str, info: dict | None) -> str | None:
     d = (info or {}).get("device", "")
     if not d:
         return None
+    if "M2004J19" in d:
+        return "Redmi 9"
     if "23053RN02Y" in d or "Redmi" in d:
         return "Redmi"
     if "SM-A32" in d:
@@ -838,7 +840,7 @@ class Engine:
     def _remeter(self):
         """Phones meter the light afresh and hold it for what follows (a calibration or a game):
         the exposure no longer jumps when you walk up to a camera."""
-        for s in self.slots[:2]:
+        for s in self.slots:                 # every phone; the Mac camera has no such call
             fn = getattr(s.src, "remeter_exposure", None)
             if fn:
                 fn()
@@ -1085,23 +1087,28 @@ class Engine:
                     continue
                 ts, skel = triangulate_tracks(cams, tracks[0], tracks[1])
                 tr = tracks[i]
-                rng = tr.info.get("focal_range_px") or (mac_focal_range(tr.width) if self.slots[i].is_mac else None)
+                sl = self.slots[i]
+                result["extra_name"] = self.cam_name(sl)
+                f_phone = None if sl.is_mac else phone_focal(tr.info, tr.width, tr.height)
+                rng = tr.info.get("focal_range_px") or (mac_focal_range(tr.width) if sl.is_mac else None)
                 try:
-                    cam, m = calibrate_extra(tr, ts, skel, name=f"cam{i}", focal_range=tuple(rng) if rng else None, log=lg)
+                    cam, m = calibrate_extra(tr, ts, skel, name=f"cam{i}", focal=f_phone,
+                                             focal_range=tuple(rng) if rng and f_phone is None else None, log=lg)
                 except RuntimeError as e:
-                    result["mac_error"] = "Mac майже не бачив тебе" if "usable points" in str(e) else str(e)
+                    result["mac_error"] = "камера майже не бачила тебе" if "usable points" in str(e) else str(e)
                     continue
                 if m["reproj_median_px"] > 30:
-                    result["mac_error"] = f"Mac розташовано неточно ({m['reproj_median_px']:.0f} px)"
+                    result["mac_error"] = f"камера розташована неточно ({m['reproj_median_px']:.0f} px)"
                     continue
                 cams.append(cam)
-                hosts.append(self.slots[i].host)
+                hosts.append(sl.host)
                 meta["extra"][f"cam{i}"] = m
-            # A Mac camera that is on in the settings but recorded nothing must not go unnoticed.
+                result["mac"] = {"px": m["reproj_median_px"]}
+            # A third camera that is on in the settings but recorded nothing must not go unnoticed.
             if self.settings["use_mac"] and result["mac_error"] is None and any(
                     f"cam{s.index}" not in meta["extra"] for s in self.slots[2:]):
+                result["extra_name"] = self.cam_name(self.slots[2])
                 result["mac_error"] = "камера ще вмикалась, тож її немає в калібровці — повтори, щоб вона теж допомагала"
-                result["mac"] = {"px": m["reproj_median_px"]}
             meta.update({"recording": out_dir, "height_m": float(self.settings["height_m"]), "source": "app (live poses)"})
             if os.path.exists(self.calib_path):
                 shutil.copy(self.calib_path, f"{self.d}/calibration_prev.json")
@@ -1134,7 +1141,8 @@ class Engine:
             st = s.status()
             cams.append({
                 "name": self.cam_name(s), "host": s.host, "state": s.state, "error": s.error,
-                "mac": s.is_mac or (s.index >= 2 and not s.online),
+                "mac": s.is_mac or (s.index >= 2 and not s.online and not s.host[:1].isdigit()),
+                "extra": s.index >= 2,          # the optional third camera: the Mac or a phone
                 "battery": st.get("battery"), "charging": st.get("charging"),
                 "hot": bool(st and (st.get("thermal", -1) >= 2 or st.get("temp_c", 0) >= 42)),
                 "person": now - s.person_t < 1.0, "fps": round(s.rate_pose, 1),

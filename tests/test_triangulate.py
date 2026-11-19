@@ -61,3 +61,18 @@ def test_swap_resolved_without_history_by_body_shape():
     poses[0] = Pose2D(poses[0].keypoints[LR_SWAP], poses[0].scores[LR_SWAP])
     fixed = triangulate_with_swap_check(CAMS, poses)
     assert np.abs(fixed.points - J).max() < 1e-6
+
+
+def test_extra_camera_weight_is_capped():
+    """A third phone (same focal as the phones) gets the MacBook-level weight, not 1:
+    it joins only part of the steps and each join/leave would move the points."""
+    from fbt.camera import Camera
+    from fbt.triangulate import EXTRA_MAX_WEIGHT, view_weights
+    phones = ring_of_cameras([-40, 40], distance=1.6, vfov_deg=96)
+    third = Camera.look_at("third", (0.0, 1.0, -2.0), (0.0, 0.9, 0.0), vfov_deg=96, width=phones[0].width, height=phones[0].height)
+    mac = Camera.look_at("mac", (0.0, 0.9, -1.5), (0.0, 1.0, 0.0), vfov_deg=30, width=phones[0].width, height=phones[0].height)
+    w = view_weights(phones + [third])
+    assert w[0] == w[1] == 1 and abs(w[2] - EXTRA_MAX_WEIGHT) < 1e-9
+    w_mac = view_weights(phones + [mac])                       # long focal: its own, smaller weight
+    assert w_mac[2] < EXTRA_MAX_WEIGHT
+    assert abs(w_mac[2] - phones[0].K[0, 0] / mac.K[0, 0]) < 1e-9
