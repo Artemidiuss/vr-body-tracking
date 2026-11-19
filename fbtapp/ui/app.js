@@ -341,9 +341,9 @@ const SLIDERS = [
   ["head_predict_ms", "Передбачення голови", "щоб ноги не відставали при нахилах", 0, 300, 10, "мс"],
   ["head_smooth_hz", "Плавність голови", "менше — плавніше", 0.5, 6, 0.1, "Гц"],
   ["yaw_trim", "Поправка повороту", "якщо тіло в грі трохи розвернуте", -30, 30, 1, "°"],
-  ["extra_fps", "Частота третьої камери", "телефон на ПК: 30 (від 25 його вага як у телефонів); MacBook: більше — точніше, але Mac сильніше гріється", 5, 30, 5, "к/с"],
+  ["extra_fps", "Частота третьої камери", "телефон на ПК: 30; MacBook: більше — точніше, але Mac сильніше гріється", 5, 30, 5, "к/с"],
 ];
-const CHECKS = ["hmd_anchor", "track_chest", "track_knees", "track_elbows", "foot_flat", "use_mac", "auto_sleep", "voice_alerts"];
+const CHECKS = ["hmd_anchor", "track_chest", "track_knees", "track_elbows", "foot_flat", "smooth_fast", "use_mac", "auto_sleep", "voice_alerts"];
 $("#sliders").innerHTML = SLIDERS.map(([k, t, hint, mn, mx, st, u]) => `
   <div class="slider" data-k="${k}">
     <div class="t"><b>${t}</b><div class="num"><input type="number" min="${mn}" max="${mx}" step="${st}" aria-label="${t}, ${u}"><small>${u}</small></div></div>

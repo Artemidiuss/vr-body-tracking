@@ -76,16 +76,3 @@ def test_extra_camera_weight_is_capped():
     w_mac = view_weights(phones + [mac])                       # long focal: its own, smaller weight
     assert w_mac[2] < EXTRA_MAX_WEIGHT
     assert abs(w_mac[2] - phones[0].K[0, 0] / mac.K[0, 0]) < 1e-9
-
-
-def test_extra_camera_at_30_fps_is_not_capped():
-    """At 25+ fps a third phone weighs as a phone (its focal weight); the MacBook keeps its
-    small focal weight; at 15 fps the cap stays."""
-    from fbt.camera import Camera
-    from fbt.triangulate import EXTRA_MAX_WEIGHT, extra_cap, view_weights
-    phones = ring_of_cameras([-40, 40], distance=1.6, vfov_deg=96)
-    third = Camera.look_at("third", (0.0, 1.0, -2.0), (0.0, 0.9, 0.0), vfov_deg=96, width=phones[0].width, height=phones[0].height)
-    mac = Camera.look_at("mac", (0.0, 0.9, -1.5), (0.0, 1.0, 0.0), vfov_deg=30, width=phones[0].width, height=phones[0].height)
-    assert abs(view_weights(phones + [third], cap=extra_cap(30))[2] - 1.0) < 1e-9
-    assert abs(view_weights(phones + [third], cap=extra_cap(15))[2] - EXTRA_MAX_WEIGHT) < 1e-9
-    assert abs(view_weights(phones + [mac], cap=extra_cap(30))[2] - phones[0].K[0, 0] / mac.K[0, 0]) < 1e-9

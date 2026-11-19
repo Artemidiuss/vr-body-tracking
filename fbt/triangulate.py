@@ -59,59 +59,67 @@ def triangulate_pose(cams: list[Camera], poses: list[Pose2D | None],
     view_weight: per-camera multiplier of the DLT weight. A DLT row's error is
     focal x metric error, so a long-focal (or close) camera outweighs the
     others for no reason; f_ref / f_camera puts all views on equal terms.
+    All 26 points at once (batched DLT, same maths as triangulate_point per point: a missing
+    view is a zero row, which leaves the solution unchanged). The per-point loop took ~4 ms per
+    call, five calls per 3D step with the swap check: 20 ms of Python in the tracking thread.
     """
-    thr = np.broadcast_to(np.asarray(max_err_px, float), (len(cams),))
-    vw = np.broadcast_to(np.asarray(view_weight, float), (len(cams),))
+    V = len(cams)
+    thr = np.broadcast_to(np.asarray(max_err_px, float), (V,))
+    vw = np.broadcast_to(np.asarray(view_weight, float), (V,))
+    P = np.stack([c.P for c in cams])                                      # (V,3,4)
+    uv = np.zeros((V, NUM_KEYPOINTS, 2))
+    sc = np.zeros((V, NUM_KEYPOINTS))
+    for i, p in enumerate(poses):
+        if p is not None:
+            uv[i], sc[i] = p.keypoints, p.scores
+    use = sc >= min_score                                                  # (V,26)
+    w = sc * vw[:, None]
     pts = np.zeros((NUM_KEYPOINTS, 3))
     valid = np.zeros(NUM_KEYPOINTS, bool)
     err = np.full(NUM_KEYPOINTS, np.inf)
     nv = np.zeros(NUM_KEYPOINTS, int)
-    for k in range(NUM_KEYPOINTS):
-        views = [(c, p.keypoints[k], p.scores[k] * vw[i], thr[i]) for i, (c, p) in enumerate(zip(cams, poses))
-                 if p is not None and p.scores[k] >= min_score]
-        while len(views) >= 2:
-            X = triangulate_point([v[0].P for v in views],
-                                  np.array([v[1] for v in views]),
-                                  np.array([v[2] for v in views]))
-            e = _reproj_err([v[0] for v in views], X, [v[1] for v in views])
-            r = e / np.array([v[3] for v in views])
-            if r.max() <= 1.0 or len(views) == 2:
-                ok = r.max() <= 1.0
-                pts[k], valid[k], err[k], nv[k] = X, ok, e.mean(), len(views)
-                break
-            views.pop(int(np.argmax(r)))  # 3+ views: drop the outlier view
+    todo = use.sum(0) >= 2
+    while todo.any():
+        ks = np.where(todo)[0]
+        m = use[:, ks].T                                                   # (K,V)
+        ww = (w[:, ks].T * m)[:, :, None]                                  # (K,V,1)
+        A = np.concatenate([ww * (uv[:, ks, 0].T[:, :, None] * P[None, :, 2] - P[None, :, 0]),
+                            ww * (uv[:, ks, 1].T[:, :, None] * P[None, :, 2] - P[None, :, 1])], axis=1)
+        X = np.linalg.svd(A)[2][:, -1]
+        X = X[:, :3] / X[:, 3:4]                                           # (K,3)
+        Xc = np.einsum("vij,kj->kvi", P, np.c_[X, np.ones(len(ks))])       # (K,V,3) = K (R X + t)
+        proj = Xc[:, :, :2] / np.maximum(Xc[:, :, 2:3], 1e-9)
+        e = np.linalg.norm(proj - uv[:, ks].transpose(1, 0, 2), axis=2)    # (K,V)
+        r = np.where(m, e / thr[None, :], -np.inf)
+        n_k = m.sum(1)
+        done = (r.max(1) <= 1.0) | (n_k == 2)
+        kd = ks[done]
+        pts[kd], valid[kd], nv[kd] = X[done], r[done].max(1) <= 1.0, n_k[done]
+        err[kd] = np.where(m[done], e[done], 0).sum(1) / n_k[done]
+        todo[kd] = False
+        kr = ks[~done]                                                     # 3+ views: drop the outlier view
+        use[np.argmax(r[~done], axis=1), kr] = False
     return Pose3D(pts, valid, err, nv, [False] * len(cams))
 
 
 EXTRA_MAX_WEIGHT = 0.27
-EXTRA_FULL_RATE = 25.0       # an extra camera at this pose rate or faster is not capped (below)
 
 
-def extra_cap(extra_fps: float) -> float:
-    """The weight cap for an extra camera running its pose at extra_fps.
-    At 30 fps a third phone joins as many 3D steps as its latency allows (67-90%), and its cap
-    only threw its view away: at the phone's weight, legs shook the same with it in the middle of
-    the room (game 05:02: standing 1.38 vs 1.44 m/s2) and less from a corner (game 20:20: 0.97 /
-    1.15 / 1.65 vs 1.09 / 1.37 / 2.16 standing / sitting / lying, bone spread 3.0 vs 3.8 cm).
-    At 15 fps the cap stays: there the full weight added shake (sitting +48%; ARCHITECTURE §37-38).
-    A long-focal camera (the MacBook, f_ref / f ~0.26) keeps its focal weight either way."""
-    return 1.0 if extra_fps >= EXTRA_FULL_RATE else EXTRA_MAX_WEIGHT
-
-
-def view_weights(cams: list[Camera], n_ref: int = 2, cap: float = EXTRA_MAX_WEIGHT) -> np.ndarray:
+def view_weights(cams: list[Camera], n_ref: int = 2) -> np.ndarray:
     """DLT weight multipliers: 1 for the first n_ref cameras (phones), f_ref / f
     for the others, so a long-focal camera does not outweigh the phones.
     Offline (held-out half of a recording): upper-body bone spread 1.68 -> 1.36 cm.
 
-    And at most `cap` (extra_cap(): EXTRA_MAX_WEIGHT below 25 fps): an extra camera at 15 fps
-    arrives later and rarer, so it joins only part of the 3D steps (~58% for a phone)
-    and every join or leave moves the point. With a third phone at its focal weight
-    (0.95) knees and hips shook 3x (standing 12.9 / 10.6 mm per frame vs 4.0 / 3.5
-    from the phones alone); at 0.27, the MacBook's own weight, 4.3 / 3.5."""
+    And at most EXTRA_MAX_WEIGHT: an extra camera that joins only part of the 3D steps (~58% for a
+    phone at 15 fps, 88-90% at 30 before it joined every step, §42) moves the point at every join
+    or leave. With a third phone at its focal weight (0.95) knees and hips shook 3x at 15 fps
+    (standing 12.9 / 10.6 mm per frame vs 4.0 / 3.5); at 30 fps the median shake even dropped,
+    but the jerks a player sees doubled to quadrupled (hip / ankle steps > 5 mm: 5 / 9 -> 21 / 45
+    per minute, game 21:29; ARCHITECTURE §41). At 0.27, the MacBook's own weight, neither."""
     w = np.ones(len(cams))
     if len(cams) > n_ref:
         fref = np.mean([c.K[0, 0] for c in cams[:n_ref]])
-        w[n_ref:] = [min(fref / c.K[0, 0], cap) for c in cams[n_ref:]]
+        w[n_ref:] = [min(fref / c.K[0, 0], EXTRA_MAX_WEIGHT) for c in cams[n_ref:]]
     return w
 
 

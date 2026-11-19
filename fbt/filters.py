@@ -84,9 +84,12 @@ FLEXIBLE = {IDX["neck"]: (0.6, 1.05), IDX["head"]: (0.7, 1.3), IDX["nose"]: (0.7
 # raised the feet in the T-pose VRChat calibrates in, so they sank afterwards (1.3-3.8 cm in our
 # games), and lowered them lying (up to 4 cm). Now the pelvis moves by what the two legs say
 # (their bones, as now, ending at the ankles), smoothed over FEET_TAU: the error follows the pose,
-# keypoint noise is fast, and unsmoothed the hip tracker shook 17-33% more (ARCHITECTURE §40).
+# keypoint noise is fast, and unsmoothed the hip tracker shook 17-33% more. An ankle glitch now
+# moves the pelvis by half of it, smoothed: at 0.5 s that doubled the hip's vertical jerks > 5 mm
+# (2-5 -> 7-11 per minute standing), at 1 s 6 / 6 / 0 vs 5 / 2 / 0 with 86% of the correction in
+# place 2 s into a T-pose (ARCHITECTURE §40-41).
 LEGS = [(IDX[f"{s}_hip"], IDX[f"{s}_knee"], IDX[f"{s}_ankle"]) for s in ("left", "right")]
-FEET_TAU = 0.5
+FEET_TAU = 1.0
 
 
 class SkeletonFit:
@@ -160,9 +163,11 @@ class SkeletonFit:
                      - (P[hip] + unit(P[hl] - P[hip]) * L[hl]) for hl, kn, an in LEGS], axis=0)
         if t is None:
             return d
-        if self.pelvis_shift is None or self._shift_t is None or not 0 <= t - self._shift_t <= 0.3:
-            self.pelvis_shift = d                       # first frame or after a gap: start afresh
+        if self.pelvis_shift is None or self._shift_t is None or t < self._shift_t:
+            self.pelvis_shift = d                       # first frame
         else:
+            # after a gap the step is simply longer (and converges faster); starting afresh there
+            # made the pelvis jump whenever the torso was lost for a moment
             self.pelvis_shift = self.pelvis_shift + (1 - np.exp(-(t - self._shift_t) / FEET_TAU)) * (d - self.pelvis_shift)
         self._shift_t = t
         return self.pelvis_shift

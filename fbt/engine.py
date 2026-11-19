@@ -30,7 +30,7 @@ from .poselog import FRAME3D, NO_PAIR, NO_TORSO, PoseLog
 from .skeleton import IDX
 from .system import KeepAwake, battery, ping, say
 from .trackers import head_tracker, is_tpose, solve, to_unity
-from .triangulate import extra_cap, triangulate_with_swap_check, view_thresholds, view_weights
+from .triangulate import triangulate_with_swap_check, view_thresholds, view_weights
 
 CORE = [IDX[k] for k in ("hip", "left_hip", "right_hip", "neck")]
 DEFAULTS = {
@@ -51,6 +51,7 @@ DEFAULTS = {
     "foot_flat": False,          # feet perpendicular to the shin (steadier, no ankle flex)
     # Tuning, applied live
     "smooth_hz": 2.5,            # body One-Euro min cutoff: lower = smoother, more lag
+    "smooth_fast": False,        # body filter lets go fast once you move (ARCHITECTURE §43)
     "predict_ms": 0,             # body motion prediction (speed-gated)
     "head_offset_cm": -5,        # head anchor along the head's facing: moves all trackers fwd/back in VRChat
     "head_predict_ms": 200,
@@ -65,6 +66,17 @@ AUTO_SLEEP_S = 300
 # made every picture go soft for ~3 s out of 10: auto exposure picks 30 ms here (§38).
 LIGHT_CHANGE = 1.35
 BUSY_CALIB = ("countdown", "recording", "computing")
+# A third phone at the phones' pose rate takes part in every 3D step like they do (_track_loop):
+# the step waits for it unless its newest pose is this far behind the others' (a stall). Normal
+# spread: latency 71-103 ms by phone plus up to one frame (33 ms).
+PEER_FPS = 25
+PEER_STALL_S = 0.15
+# Body One-Euro speed response (beta, power). Steady: 50 ms behind moves. Fast ("opens fast", the
+# PinoFBT-style power 2): 8 ms, about the same standing still (+5%), but slow small moves shake
+# 45-50% more and the hip jerks a little more often (games 22:38 and 20:20, ARCHITECTURE §43).
+SMOOTH_STEADY = (0.4, 1.0)
+SMOOTH_FAST = (100.0, 2.0)
+
 
 
 def light_level(ms: float) -> str:
@@ -73,7 +85,7 @@ def light_level(ms: float) -> str:
     Redmi at 20 ms had 0.88 px of 2D jitter, at 10 ms 0.50 (ARCHITECTURE.md §37, §38). A darker
     picture alone does not hurt the pose (§30), so only the exposure time counts."""
     return "good" if ms <= 12 else "fair" if ms <= 22 else "low"
-TUNABLE = {"hmd_anchor", "smooth_hz", "predict_ms", "head_offset_cm", "head_predict_ms", "head_smooth_hz", "yaw_trim",
+TUNABLE = {"hmd_anchor", "smooth_hz", "smooth_fast", "predict_ms", "head_offset_cm", "head_predict_ms", "head_smooth_hz", "yaw_trim",
            "extra_fps", "track_chest", "track_knees", "track_elbows", "foot_flat"}
 
 def enabled_trackers(st: dict) -> tuple:
@@ -604,8 +616,6 @@ class Engine:
         self.settings = self._load_settings()
         if cameras:
             self.settings["cameras"] = list(cameras)
-        if len(self.cams) >= 2:              # the third camera's weight depends on its rate (a setting)
-            self.view_w = view_weights(self.cams, cap=extra_cap(self.settings["extra_fps"]))
         self.mode = "setup"
         self.calib: dict = {"state": "idle"}
         self._cancel = threading.Event()
@@ -671,8 +681,7 @@ class Engine:
         with self.lock:
             self.cams, self.calib_hosts, self.calib_meta, self.calib_time = cams, hosts, meta, when
             self.view_thr = view_thresholds(cams) if len(cams) >= 2 else None
-            fps = getattr(self, "settings", DEFAULTS)["extra_fps"]     # at start-up settings come after this
-            self.view_w = view_weights(cams, cap=extra_cap(fps)) if len(cams) >= 2 else None
+            self.view_w = view_weights(cams) if len(cams) >= 2 else None
             for s in getattr(self, "slots", []):
                 s.t_offset = cams[s.index].time_offset if s.index < len(cams) else 0.0
             self._reset_3d = True
@@ -704,9 +713,6 @@ class Engine:
             self._make_slots()
         for sl in self.slots[2:]:
             sl.max_rate = float(self.settings["extra_fps"])
-        if "extra_fps" in new and len(self.cams) >= 2:     # its weight depends on its rate
-            with self.lock:
-                self.view_w = view_weights(self.cams, cap=extra_cap(self.settings["extra_fps"]))
         if self.out is not None and "quest_ip" in new:
             self.out.sender = VRChatSender(self.settings["quest_ip"], 9000)
         return self.settings
@@ -733,6 +739,7 @@ class Engine:
             stab = self.stab
             if stab is not None:     # live tuning from the settings window
                 stab.euro.min_cutoff = max(0.05, float(self.settings["smooth_hz"]))
+                stab.euro.beta, stab.euro.power = SMOOTH_FAST if self.settings.get("smooth_fast") else SMOOTH_STEADY
                 pm = float(self.settings["predict_ms"])
                 if pm > 0 and stab.pred is None:
                     stab.pred = MotionPredictor(pm / 1000)
@@ -753,13 +760,22 @@ class Engine:
             la, lb = slots[0].latest_pose(), slots[1].latest_pose()
             if la is None or lb is None:
                 continue
-            behind = 0 if la[0] <= lb[0] else 1
-            t_ref = (la if behind == 0 else lb)[0]
+            # The step's moment: the newest one every phone has already seen. A third phone at the
+            # phones' rate counts like them; before, only the two phones did, so the third one was
+            # missing from 10-12% of the steps (its pose still on its way), and each time it came
+            # or went the points jumped (ARCHITECTURE §42). A camera far behind (a stall) is left out.
+            peers = [i for i in range(2, len(cams)) if i < len(slots) and self._peer(slots[i])]
+            latest = {0: la[0], 1: lb[0]}
+            for i in peers:
+                lp = slots[i].latest_pose()
+                if lp is not None:
+                    latest[i] = lp[0]
+            newest = max(latest.values())
+            t_ref = min(t for i, t in latest.items() if i < 2 or t >= newest - PEER_STALL_S)
             if last_ref is not None and t_ref <= last_ref:
                 continue
             last_ref = t_ref
-            pa = la[1] if behind == 0 else slots[0].pose_at(t_ref)
-            pb = slots[1].pose_at(t_ref) if behind == 0 else lb[1]
+            pa, pb = slots[0].pose_at(t_ref), slots[1].pose_at(t_ref)
             if pa is None or pb is None:
                 self.skips["no synced pair"] += 1
                 pl = self._posesf
@@ -771,7 +787,10 @@ class Engine:
             for i in range(2, len(cams)):
                 s = slots[i] if i < len(slots) else None
                 ok = s is not None and s.online and self.settings["use_mac"]
-                extra.append(s.pose_at(t_ref, max_dt=0.02, max_gap=gap) if ok else None)
+                if ok and i in peers:
+                    extra.append(s.pose_at(t_ref))        # like a phone of the pair
+                else:
+                    extra.append(s.pose_at(t_ref, max_dt=0.02, max_gap=gap) if ok else None)
             res = triangulate_with_swap_check(cams, [pa, pb] + extra, prev=prev,
                                               max_err_px=thr, view_weight=vw)
             pl = self._posesf
@@ -798,6 +817,12 @@ class Engine:
                     out.step(S, res, t_ref)
                 except Exception as e:   # never stop tracking for one bad frame
                     self.skips[f"send error {type(e).__name__}"] += 1
+
+    def _peer(self, s: CamSlot) -> bool:
+        """A third camera that is a phone at the phones' rate: it joins the 3D steps on the same
+        terms as they do. The MacBook (15 fps, its own placement) stays an extra camera."""
+        return (s.online and not s.is_mac and self.settings["use_mac"]
+                and float(self.settings["extra_fps"]) >= PEER_FPS)
 
     def _new_stab(self):
         st = SkeletonStabilizer(min_cutoff=float(self.settings["smooth_hz"]), beta=0.4, floor_clip=True,
