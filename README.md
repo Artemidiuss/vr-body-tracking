@@ -103,12 +103,11 @@ Needs an NVIDIA GPU (GTX 10xx or newer) with a current driver. CUDA and cuDNN do
 winget install --id astral-sh.uv -e
 git clone <this repository> fbt
 fbt\windows\setup.cmd
-fbt\windows\FBT.cmd
 ```
 
 - `setup.cmd` makes `.venv` with Python 3.12 and the CUDA build of ONNX Runtime (`windows/requirements-cuda.txt`, `windows/overrides.txt`), then checks the model really runs on the GPU. Run it again after pulling changes.
-- `FBT.cmd` starts the hub in its console window and opens the interface as an Edge app window. Close the console to quit.
-- `setup.cmd` also puts an **FBT** shortcut on the desktop (`windows/shortcut.ps1`): the console starts minimised, so only the FBT window shows.
+- `setup.cmd` also puts an **FBT** shortcut on the desktop (`windows/shortcut.ps1`). It runs the hub without a console (output in `data/logs/app.log`) and opens the interface as an Edge app window with its own profile (`data/edge_window`). Closing that window quits FBT. Clicking the shortcut while FBT runs just opens the window again.
+- `FBT.cmd` does the same with a console, to watch the hub's output live.
 - Versions are pinned for GTX 10xx (Pascal): onnxruntime-gpu 1.26 (the last one for CUDA 12) and cuDNN 9.10 (newer ones no longer have Pascal kernels). Newer cards run them too.
 - **Network:** set your Wi-Fi to *Private* (Settings → Network & Internet → Wi-Fi → your network). On a *Public* network Windows Firewall blocks the headset pose VRChat sends. When Windows asks whether Python may use the network, allow it.
 - No third camera of its own: use a third phone. Voice alerts need a Ukrainian voice in Windows; without one they stay silent.

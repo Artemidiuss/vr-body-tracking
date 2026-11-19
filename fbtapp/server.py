@@ -30,6 +30,7 @@ UI = os.path.join(os.path.dirname(__file__), "ui")
 TYPES = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml"}
 ENGINE: Engine | None = None
+PAGES, PAGE_T, PAGES_LOCK = 0, 0.0, threading.Lock()    # open UI pages (their /events streams), when the last one went
 
 
 def _side(a: str, b: str):
@@ -101,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
                 self._video(int(path.split("/")[2]))
             else:
                 self._send(404, b"not found", "text/plain")
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:         # the window closed mid-reply (Windows: ConnectionAbortedError)
             pass
 
     def _replay(self, name: str):
@@ -119,12 +120,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
-        while True:
-            setup = ENGINE.mode == "setup"
-            msg = json.dumps(ENGINE.snapshot(with_skeleton=setup), ensure_ascii=False)
-            self.wfile.write(f"data: {msg}\n\n".encode())
-            self.wfile.flush()
-            time.sleep(0.1 if setup else 0.3)
+        global PAGES, PAGE_T
+        with PAGES_LOCK:
+            PAGES += 1
+        try:
+            while True:
+                setup = ENGINE.mode == "setup"
+                msg = json.dumps(ENGINE.snapshot(with_skeleton=setup), ensure_ascii=False)
+                self.wfile.write(f"data: {msg}\n\n".encode())
+                self.wfile.flush()
+                time.sleep(0.1 if setup else 0.3)
+        finally:
+            with PAGES_LOCK:
+                PAGES -= 1
+                PAGE_T = time.perf_counter()
 
     def _video(self, i: int):
         self.send_response(200)
@@ -182,8 +191,26 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": True})
             else:
                 self._send(404, b"not found", "text/plain")
-        except (BrokenPipeError, ConnectionResetError):
+        except ConnectionError:         # the window closed mid-reply (Windows: ConnectionAbortedError)
             pass
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        if isinstance(sys.exc_info()[1], ConnectionError):
+            return                      # a closed window, not an error worth a traceback
+        super().handle_error(request, client_address)
+
+
+def already_running(port: int) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1) as r:
+            return r.read() == b"ok"
+    except OSError:
+        return False
 
 
 def main():
@@ -203,11 +230,18 @@ def main():
         pass
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(root)
+    url = f"http://127.0.0.1:{a.port}"
+    if already_running(a.port):          # started again (the shortcut clicked twice): just show the window
+        if a.browser:
+            open_window(url, a.data)
+        return
+    if sys.stdout is None:               # pythonw (the Windows shortcut, no console): output goes to app.log, as on a Mac
+        os.makedirs(os.path.join(a.data, "logs"), exist_ok=True)
+        sys.stdout = sys.stderr = open(os.path.join(a.data, "logs", "app.log"), "w", encoding="utf-8", buffering=1)
     if a.cameras and not a.settings:      # a test run must not overwrite the real settings
         a.settings = os.path.join(a.data, "app_settings_override.json")
     ENGINE = Engine(a.data, settings_path=a.settings, cameras=a.cameras.split(",") if a.cameras else None)
-    srv = ThreadingHTTPServer(("127.0.0.1", a.port), Handler)
-    srv.daemon_threads = True
+    srv = Server(("127.0.0.1", a.port), Handler)
 
     def bye(*_):
         try:
@@ -225,24 +259,55 @@ def main():
                 time.sleep(1)
             bye()
         threading.Thread(target=watch, daemon=True).start()
-    print(f"FBT UI on http://127.0.0.1:{a.port}", flush=True)
+    print(f"FBT UI on {url}", flush=True)
     if a.browser:
-        open_window(f"http://127.0.0.1:{a.port}")
+        win = open_window(url, a.data)
+        if win is not None:              # FBT's own window: closing it quits FBT, like FBT.app on a Mac
+            def window_watch():
+                # Quit when the Edge we started has ended AND no FBT page has been open for 5 s.
+                # The process alone is not enough: Edge sometimes hands its window to another Edge
+                # process of the same profile and exits at once (seen: an FBT left running with no
+                # window). The pages alone are not either: a page could drop its stream while its
+                # window stays open.
+                while True:
+                    time.sleep(1.0)
+                    with PAGES_LOCK:
+                        gone = PAGES == 0 and PAGE_T > 0 and time.perf_counter() - PAGE_T > 5
+                    if gone and win.poll() is not None:
+                        print("FBT window closed: quitting", flush=True)
+                        bye()
+            threading.Thread(target=window_watch, daemon=True).start()
     srv.serve_forever()
 
 
-def open_window(url: str) -> None:
+def open_window(url: str, data: str = "data"):
     """The UI in its own window: on Windows Edge's app mode (no tabs, no address bar; Edge comes
-    with Windows 10/11), otherwise the default browser. On a Mac FBT.app is the window."""
+    with Windows 10/11), otherwise the default browser. On a Mac FBT.app is the window.
+    On Windows the window gets its own Edge profile (data/edge_window), so it is a separate Edge
+    process that ends when the window is closed (measured: within 1 s): that process is returned,
+    and the caller quits FBT with it. In the user's own profile Edge would hand the window to an
+    already running Edge and exit at once."""
     if sys.platform == "win32":
         import subprocess
+        prof = os.path.abspath(os.path.join(data, "edge_window"))
+        prefs = os.path.join(prof, "Default", "Preferences")
+        if not os.path.exists(prefs):    # a fresh profile: no offer to translate the Ukrainian page
+            os.makedirs(os.path.dirname(prefs), exist_ok=True)
+            with open(prefs, "w", encoding="utf-8") as fh:
+                json.dump({"translate": {"enabled": False}, "signin": {"allowed": False}}, fh)
         for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA")):
             edge = os.path.join(base or "", "Microsoft", "Edge", "Application", "msedge.exe")
             if base and os.path.exists(edge):
-                subprocess.Popen([edge, f"--app={url}", "--window-size=1400,900"])
-                return
+                # No sign-in, sync or extensions: a fresh Edge profile signs in to the Windows
+                # Microsoft account by itself and pulls its extensions, whose pages kept the
+                # process alive after the FBT window was closed (seen with a VPN extension).
+                return subprocess.Popen([edge, f"--app={url}", "--window-size=1400,900", f"--user-data-dir={prof}",
+                                         "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+                                         "--disable-sync", "--disable-background-mode",
+                                         "--disable-features=msImplicitSignin,msEdgeAutoSignIn"])
     import webbrowser
     webbrowser.open(url)
+    return None
 
 
 if __name__ == "__main__":

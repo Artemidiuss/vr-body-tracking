@@ -59,7 +59,20 @@ DEFAULTS = {
     "extra_fps": 10,             # pose rate of the Mac camera (heat: see ARCHITECTURE.md §19)
 }
 AUTO_SLEEP_S = 300
+# Setup screen: a phone meters the light again when, at the exposure it holds, its picture got this
+# much brighter or darker (a lamp switched on or off). Someone walking in front of a camera moves the
+# brightness by 15-25% (ARCHITECTURE.md §28), so that alone does not. Re-metering on a timer instead
+# made every picture go soft for ~3 s out of 10: auto exposure picks 30 ms here (§38).
+LIGHT_CHANGE = 1.35
 BUSY_CALIB = ("countdown", "recording", "computing")
+
+
+def light_level(ms: float) -> str:
+    """How much light a phone has, from the exposure it holds (the shortest of 10 / 20 / 30 ms that
+    the light allows, FBT Cam). Longer = more smear on moving legs and more noise: in our games
+    Redmi at 20 ms had 0.88 px of 2D jitter, at 10 ms 0.50 (ARCHITECTURE.md §37, §38). A darker
+    picture alone does not hurt the pose (§30), so only the exposure time counts."""
+    return "good" if ms <= 12 else "fair" if ms <= 22 else "low"
 TUNABLE = {"hmd_anchor", "smooth_hz", "predict_ms", "head_offset_cm", "head_predict_ms", "head_smooth_hz", "yaw_trim",
            "extra_fps", "track_chest", "track_knees", "track_elbows", "foot_flat"}
 
@@ -265,6 +278,10 @@ class CamSlot:
         self.rec_size = None
         self.size = None                                # (w, h) of the latest frame
         self.rate_pose = self.rate_in = 0.0
+        self.light: dict | None = None                  # the exposure the phone last held: {"ms", "iso"}
+        self.luma = collections.deque(maxlen=120)       # (time, mean brightness) of recent frames
+        self.light_ref: float | None = None             # brightness right after the exposure was held
+        self.held_since: float | None = None            # when the hub first saw that exposure held
         self.offline_since: float | None = time.perf_counter()
         self._last_t = -1e9
         self._stop = threading.Event()
@@ -333,6 +350,7 @@ class CamSlot:
             last, last_new = f.index, time.perf_counter()
             self.n_frames += 1
             self.size = (f.image.shape[1], f.image.shape[0])
+            self.luma.append((last_new, float(f.image[::16, ::16].mean())))   # ~0.05 ms
             if self.state != "online":
                 self.state, self.error, self.offline_since = "online", "", None
             rec = self.rec
@@ -884,10 +902,46 @@ class Engine:
         was_online: dict = {}
         low_said: set = set()
         t_stats = time.perf_counter()
+        light_said_for = None
         while not self._quit.is_set():
             time.sleep(1.0)
             now = time.perf_counter()
             self._maybe_auto_sleep(now)
+            setup = self.mode == "setup" and self.calib["state"] not in BUSY_CALIB
+            for s in self.slots:
+                e = s.status().get("exposure") if s.online else None
+                if not s.online:
+                    s.light = s.light_ref = s.held_since = None
+                    continue
+                if not (e and e.get("held") and e.get("ms")):
+                    s.light_ref = s.held_since = None   # metering: the picture is changing anyway
+                    continue
+                s.held_since = s.held_since or now
+                if now - s.held_since >= 2:
+                    # Right after the hold the phone still reports the exposure of the last auto
+                    # frames (30 ms here): "too little light" flashed for a second (§38).
+                    s.light = {"ms": float(e["ms"]), "iso": int(e.get("iso") or 0)}
+                lum = [v for t, v in list(s.luma) if now - t < 2.0]
+                if len(lum) < 10 or now - s.held_since < 3:   # brightness only of frames at the held exposure
+                    continue
+                lum = float(np.median(lum))
+                if s.light_ref is None:
+                    s.light_ref = max(lum, 1.0)
+                elif setup and not LIGHT_CHANGE ** -1 < lum / s.light_ref < LIGHT_CHANGE:
+                    # The room's light changed: meter it again, so the light shown is today's. Only
+                    # on the setup screen: in a calibration or a game the exposure stays as metered
+                    # at their start (§28).
+                    s.light_ref = None
+                    fn = getattr(s.src, "remeter_exposure", None)
+                    if fn:
+                        fn()
+            # A game just started (its light held 3-6 s in): say if a phone has too little light.
+            if (self.mode == "server" and self.server_t0 and now - self.server_t0 > 10
+                    and light_said_for != self.server_t0):
+                light_said_for = self.server_t0
+                dark = [self.cam_name(s) for s in self.slots if s.light and light_level(s.light["ms"]) == "low"]
+                if dark and self.settings["voice_alerts"]:
+                    say(f"Мало світла: {', '.join(dark)}. Увімкни більше світла")
             for s in self.slots:
                 p = prev.get(id(s))
                 if p is not None:
@@ -1122,6 +1176,7 @@ class Engine:
                 "person": now - s.person_t < 1.0, "fps": round(s.rate_pose, 1),
                 "calibrated": s.index < len(self.cams) and not self._size_changed(s),
                 "size_changed": self._size_changed(s),
+                "light": dict(s.light, level=light_level(s.light["ms"])) if s.light else None,
             })
         out = self.out
         snap = {

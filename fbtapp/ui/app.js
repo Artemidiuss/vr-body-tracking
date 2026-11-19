@@ -43,6 +43,10 @@ function bat(c) {
   if (c.battery == null || c.battery < 0) return "";
   return `${c.battery}%${c.charging ? " ⚡" : ""}`;
 }
+// Light a phone has, from the exposure it holds (engine.light_level): 10 / 20 / 30 ms.
+const LIGHT = { good: ["світло добре", "ok"], fair: ["світло середнє", "warn"], low: ["мало світла", "bad"] };
+function lightText(c) { return c.light && c.state === "online" ? LIGHT[c.light.level][0] : ""; }
+function lightTitle(c) { return c.light ? `витримка ${c.light.ms} мс, ISO ${c.light.iso}` : ""; }
 function dotClass(c) { return c.state === "online" ? "ok" : c.state === "connecting" ? "warn" : "bad"; }
 function when(t) {
   if (!t) return "";
@@ -104,7 +108,7 @@ function renderSetup() {
     $("#videos").innerHTML = order.map(i => `
       <div class="tile ${S.cams[i].mac ? "mac" : "phone"}" data-i="${i}">
         <img alt="">
-        <div class="label"><span class="dot"></span><span class="nm"></span><span class="bat"></span></div>
+        <div class="label"><span class="dot"></span><span class="nm"></span><span class="bat"></span><span class="lt"></span></div>
         <div class="nosee hidden">не бачу тебе</div>
         <div class="off"><b></b><span></span></div>
       </div>`).join("");
@@ -121,6 +125,8 @@ function renderSetup() {
     $(".label .dot", el).className = `dot ${dotClass(c)}`;
     $(".label .nm", el).textContent = c.name;
     $(".label .bat", el).textContent = bat(c);
+    const lt = $(".label .lt", el);
+    lt.textContent = lightText(c); lt.className = `lt ${c.light ? LIGHT[c.light.level][1] : ""}`; lt.title = lightTitle(c);
     el.classList.toggle("person", on && c.person);
     $(".nosee", el).classList.toggle("hidden", !on || c.person);
   }
@@ -193,11 +199,14 @@ function renderPanel() {
     const off = S.cams.filter(c => c.state !== "online" && !c.mac).map(c => c.name);
     const seen = S.cams.filter(c => c.state === "online" && c.person);
     const unseen = S.cams.filter(c => c.state === "online" && !c.person).map(c => c.name);
+    const lightOf = lv => S.cams.filter(c => c.state === "online" && c.light && c.light.level === lv).map(c => c.name);
     let txt = "", muted = false;
     if (off.length) txt = `Не в мережі: ${off.join(", ")} — відкрий FBT Cam на телефоні`;
     else if (S.cams.some(c => c.size_changed)) txt = `Змінилась роздільність: ${S.cams.filter(c => c.size_changed).map(c => c.name).join(", ")} — відкалібруй ще раз`;
     else if (S.calibrated && S.tracking.mismatch) txt = "Схоже, камери зрушили — відкалібруй ще раз";
+    else if (lightOf("low").length) txt = `Мало світла: ${lightOf("low").join(", ")} — увімкни більше світла, інакше ноги в русі змазуються й тремтять`;
     else if (seen.length && unseen.length) txt = `Тебе не видно: ${unseen.join(", ")}`;
+    else if (lightOf("fair").length) txt = `Світла можна більше: ${lightOf("fair").join(", ")} — буде менше тремтіння`;
     else { txt = "У грі стань у Т-позу на секунду (зручно разом з Calibrate FBT у VRChat) — трекери вирівняються"; muted = true; }
     h.textContent = txt; h.classList.toggle("muted", muted);
   }
@@ -226,7 +235,7 @@ function renderGame() {
     const b = c.battery != null && c.battery >= 0
       ? `<div class="b${c.battery <= 15 && !c.charging ? " low" : ""}">${c.battery}%${c.charging ? "<small>⚡ заряджається</small>" : ""}</div>` : "";
     return `<div class="g-card${on ? "" : " bad"}"><div class="n"><span class="dot ${dotClass(c)}"></span>${esc(c.name)}</div>
-      <div class="s">${on ? "на зв'язку" : "немає зв'язку"}</div>${b}${c.hot ? `<div class="w">телефон гарячий</div>` : ""}</div>`;
+      <div class="s">${on ? "на зв'язку" : "немає зв'язку"}</div>${b}${c.hot ? `<div class="w">телефон гарячий</div>` : ""}${on && c.light && c.light.level !== "good" ? `<div class="w" title="${esc(lightTitle(c))}">${lightText(c)}</div>` : ""}</div>`;
   });
   const hs = S.headset;
   cards.push(`<div class="g-card${hs === false ? " bad" : ""}"><div class="n"><span class="dot ${hs == null ? "" : hs ? "ok" : "bad"}"></span>Шолом</div>
