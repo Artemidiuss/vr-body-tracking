@@ -1,0 +1,4 @@
+# rtmlib (and our pyproject) ask for the CPU "onnxruntime". On Windows "onnxruntime-gpu" takes
+# its place (requirements-cuda.txt); both install the same "onnxruntime" folder, so the CPU one
+# must not be installed there. A marker that is false on Windows drops the requirement.
+onnxruntime ; sys_platform != 'win32'

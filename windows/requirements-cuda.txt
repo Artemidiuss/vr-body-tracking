@@ -1,0 +1,6 @@
+# ONNX Runtime on an NVIDIA GPU (Windows). CUDA and cuDNN come as pip packages: no CUDA install.
+# 1.26.0 is the last onnxruntime-gpu built for CUDA 12; later ones need CUDA 13, which no
+# longer runs on GTX 10xx (Pascal). cuDNN after 9.10 has no Pascal kernels either
+# ("no kernel image is available"). Newer cards run these versions too.
+onnxruntime-gpu[cuda,cudnn]==1.26.0
+nvidia-cudnn-cu12==9.10.2.21

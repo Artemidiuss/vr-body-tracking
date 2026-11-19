@@ -1,8 +1,9 @@
 """Local web server for the FBT app: the UI page, live MJPEG of every camera
 with its 2D skeleton, a Server-Sent-Events state stream and a small JSON API.
-The native window (macapp/, FBT.app) is a WKWebView on http://127.0.0.1:8765.
+The native window (macapp/, FBT.app) is a WKWebView on http://127.0.0.1:8765; on Windows
+windows/FBT.cmd runs this with --browser, which opens an Edge app window.
 
-  .venv/bin/python -m fbtapp --browser            # without the app: opens the default browser
+  .venv/bin/python -m fbtapp --browser            # without the app: opens the default browser (Edge app window on Windows)
   .venv/bin/python -m fbtapp --cameras replay:data/rec_sit_lowres/cam0,replay:data/rec_sit_lowres/cam1,replay:data/rec_sit_lowres/cam2
 """
 
@@ -12,6 +13,7 @@ import argparse
 import json
 import os
 import signal
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -225,9 +227,22 @@ def main():
         threading.Thread(target=watch, daemon=True).start()
     print(f"FBT UI on http://127.0.0.1:{a.port}", flush=True)
     if a.browser:
-        import webbrowser
-        webbrowser.open(f"http://127.0.0.1:{a.port}")
+        open_window(f"http://127.0.0.1:{a.port}")
     srv.serve_forever()
+
+
+def open_window(url: str) -> None:
+    """The UI in its own window: on Windows Edge's app mode (no tabs, no address bar; Edge comes
+    with Windows 10/11), otherwise the default browser. On a Mac FBT.app is the window."""
+    if sys.platform == "win32":
+        import subprocess
+        for base in (os.environ.get("ProgramFiles(x86)"), os.environ.get("ProgramFiles"), os.environ.get("LOCALAPPDATA")):
+            edge = os.path.join(base or "", "Microsoft", "Edge", "Application", "msedge.exe")
+            if base and os.path.exists(edge):
+                subprocess.Popen([edge, f"--app={url}", "--window-size=1400,900"])
+                return
+    import webbrowser
+    webbrowser.open(url)
 
 
 if __name__ == "__main__":

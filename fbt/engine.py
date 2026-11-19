@@ -13,7 +13,7 @@ import glob
 import json
 import os
 import shutil
-import subprocess
+import sys
 import threading
 import time
 
@@ -28,6 +28,7 @@ from .osc_out import VRChatSender
 from .pose import Pose2D, make_backend
 from .poselog import FRAME3D, NO_PAIR, NO_TORSO, PoseLog
 from .skeleton import IDX
+from .system import KeepAwake, battery, ping, say
 from .trackers import head_tracker, is_tpose, solve, to_unity
 from .triangulate import triangulate_with_swap_check, view_thresholds, view_weights
 
@@ -35,7 +36,7 @@ CORE = [IDX[k] for k in ("hip", "left_hip", "right_hip", "neck")]
 DEFAULTS = {
     "height_m": 1.73,
     "quest_ip": "192.168.31.150",
-    "cameras": ["192.168.31.81", "192.168.31.28", "mac"],
+    "cameras": ["192.168.31.81", "192.168.31.28"] + (["mac"] if sys.platform == "darwin" else []),
     "names": {},                 # host -> friendly name, learned on first connect
     "use_mac": True,
     "voice_alerts": True,
@@ -89,12 +90,6 @@ def friendly_name(host: str, info: dict | None) -> str | None:
         return "MacBook"
     return d.split()[0].capitalize()
 
-
-def say(text: str):
-    try:
-        subprocess.Popen(["say", "-v", "Lesya", text], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        pass
 
 
 class Cancelled(Exception):
@@ -606,7 +601,7 @@ class Engine:
         self.server_t0: float | None = None
         self.setup_since = time.perf_counter()     # for the auto-sleep: a fresh setup screen gets the full wait
         self.slept_auto = False
-        self._caffeinate = None
+        self._awake = KeepAwake()
         self._statsf = None
         self._posesf: PoseLog | None = None       # every camera's 2D pose during a game (§32)
         self._quit = threading.Event()
@@ -810,10 +805,7 @@ class Engine:
             self.stab = self._new_stab()      # learn bone lengths fresh, standing in the play area
             self.mode, self.server_t0 = "server", time.perf_counter()
             self._remeter()
-        try:   # keep the display awake while the server runs
-            self._caffeinate = subprocess.Popen(["caffeinate", "-d", "-i", "-w", str(os.getpid())])
-        except OSError:
-            self._caffeinate = None
+        self._awake.start()          # keep the display awake while the server runs
         return {"ok": True}
 
     def stop_server(self) -> dict:
@@ -832,9 +824,7 @@ class Engine:
             pl, self._posesf = self._posesf, None
             if pl:
                 pl.close()
-        if self._caffeinate:
-            self._caffeinate.terminate()
-            self._caffeinate = None
+        self._awake.stop()
         return {"ok": True}
 
     def _remeter(self):
@@ -950,18 +940,6 @@ class Engine:
                 except (OSError, ValueError):
                     pass
 
-    def _mac_battery(self):
-        """{'percent': 57, 'charging': False} from pmset, or None on a desktop Mac."""
-        try:
-            out = subprocess.run(["pmset", "-g", "batt"], capture_output=True, text=True, timeout=3).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return None
-        import re
-        m = re.search(r"(\d+)%;\s*([a-zA-Z ]+);", out)
-        if not m:
-            return None
-        return {"percent": int(m.group(1)), "charging": "AC Power" in out}
-
     def _align_loop(self):
         while not self._quit.wait(0.5):
             try:
@@ -973,15 +951,11 @@ class Engine:
         n = 0
         while not self._quit.is_set():
             if n % 10 == 0:
-                self.mac_battery = self._mac_battery()
+                self.mac_battery = battery()
             n += 1
             ip = self.settings.get("quest_ip")
             if ip:
-                try:
-                    r = subprocess.run(["ping", "-c", "1", "-W", "1000", ip], capture_output=True, timeout=3)
-                    self.headset_online = r.returncode == 0
-                except (OSError, subprocess.TimeoutExpired):
-                    self.headset_online = False
+                self.headset_online = ping(ip)
             self._quit.wait(3.0)
 
     # ---------------- calibration

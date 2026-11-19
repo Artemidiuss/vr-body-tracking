@@ -14,3 +14,6 @@ android/**/.idea/
 # macOS app build output
 macapp/build/
 *.egg-info/
+
+# Windows icon (made by windows/make_icon.py)
+windows/FBT.ico

@@ -4,7 +4,11 @@ so models can be swapped and compared without touching the rest of the hub.
 
 from __future__ import annotations
 
+import glob
+import importlib.util
 import os
+import sys
+import threading
 import urllib.request
 from dataclasses import dataclass
 
@@ -16,33 +20,53 @@ MODELS_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "models")
 
 
 COREML_UNITS = {"gpu": "CPUAndGPU", "ane": "CPUAndNeuralEngine", "all": "ALL"}
+_PREP_LOCK = threading.Lock()      # the camera threads build their backends at the same time
 
 
-def coreml_session(onnx_path: str, device: str = "gpu"):
-    """ONNX Runtime session on Apple GPU / Neural Engine via CoreML.
+def resolve_device(device: str) -> str:
+    """'gpu' is the Apple GPU (CoreML) on a Mac and an NVIDIA GPU (CUDA) elsewhere."""
+    if device == "gpu" and sys.platform != "darwin":
+        return "cuda"
+    return device
 
-    rtmlib's ONNX files have a dynamic batch dimension; CoreML then rejects
-    almost the whole graph (2 of 247 nodes) and everything silently runs on
-    CPU. Pinning batch=1 and folding the shape ops lets CoreML take all
-    nodes: RTMPose-m goes from ~17 ms (CPU) to ~5 ms (GPU) on an M3.
-    The fixed model is cached next to the other models.
-    """
+
+def _save_atomic(model, path: str) -> None:
     import onnx
-    import onnxruntime as ort
+    tmp = f"{path}.{os.getpid()}.tmp"
+    onnx.save(model, tmp)
+    os.replace(tmp, path)
+
+
+def static_model(onnx_path: str) -> str:
+    """rtmlib's ONNX files have a dynamic batch dimension. Pinned to 1 and with the shape ops
+    folded, CoreML takes the whole graph (else 2 of 247 nodes, the rest silently on the CPU)
+    and CUDA gets fixed shapes. Cached in models/ as <name>.static.onnx."""
+    import onnx
     import onnxslim
 
     base = os.path.splitext(os.path.basename(onnx_path))[0]
     fixed = os.path.join(MODELS_DIR, f"{base}.static.onnx")
-    if not os.path.exists(fixed):
-        m = onnx.load(onnx_path)
-        # Only inputs: outputs may be genuinely dynamic (detector box count).
-        for t in m.graph.input:
-            for d in t.type.tensor_type.shape.dim:
-                if d.dim_param:
-                    d.Clear()
-                    d.dim_value = 1
-        os.makedirs(MODELS_DIR, exist_ok=True)
-        onnx.save(onnxslim.slim(m), fixed)
+    with _PREP_LOCK:
+        if not os.path.exists(fixed):
+            m = onnx.load(onnx_path)
+            # Only inputs: outputs may be genuinely dynamic (detector box count).
+            for t in m.graph.input:
+                for d in t.type.tensor_type.shape.dim:
+                    if d.dim_param:
+                        d.Clear()
+                        d.dim_value = 1
+            os.makedirs(MODELS_DIR, exist_ok=True)
+            _save_atomic(onnxslim.slim(m), fixed)
+    return fixed
+
+
+def coreml_session(onnx_path: str, device: str = "gpu"):
+    """ONNX Runtime session on Apple GPU / Neural Engine via CoreML.
+    RTMPose-m goes from ~17 ms (CPU) to ~5 ms (GPU) on an M3 (static_model is what makes it work).
+    """
+    import onnxruntime as ort
+
+    fixed = static_model(onnx_path)
     so = ort.SessionOptions()
     # 4 = fatal only: frames without a person make the CoreML EP log an error per frame.
     so.log_severity_level = 4
@@ -54,6 +78,106 @@ def coreml_session(onnx_path: str, device: str = "gpu"):
         }),
         "CPUExecutionProvider",
     ])
+
+
+# ---------------------------------------------------------------- NVIDIA (CUDA), e.g. on Windows
+_cuda_ready = False
+
+
+def _cuda_libraries() -> None:
+    """onnxruntime-gpu with CUDA and cuDNN from pip (the nvidia-* packages, no CUDA install).
+    cuDNN loads its sub-libraries by name while running, so their folders go on PATH too:
+    otherwise the first convolution fails and everything quietly falls back to the CPU."""
+    global _cuda_ready
+    if _cuda_ready:
+        return
+    spec = importlib.util.find_spec("nvidia")
+    for root in (spec.submodule_search_locations or []) if spec else []:
+        for d in glob.glob(os.path.join(root, "*", "bin")):
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            if hasattr(os, "add_dll_directory"):
+                os.add_dll_directory(d)
+    import onnxruntime as ort
+    if hasattr(ort, "preload_dlls"):
+        ort.preload_dlls()
+    _cuda_ready = True
+
+
+def _session_options():
+    import onnxruntime as ort
+    so = ort.SessionOptions()
+    so.log_severity_level = 3
+    # One session per model per camera. With ORT's default intra-op pool (all cores, spinning)
+    # in each of them, the models run side by side crawled: RTMPose-m 384x288 for 3 cameras
+    # gave 5 poses/s instead of 30 on a GTX 1060 (the GPU work does not need these threads).
+    so.intra_op_num_threads = 1
+    so.inter_op_num_threads = 1
+    so.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    return so
+
+
+def cuda_session(onnx_path: str):
+    import onnxruntime as ort
+    _cuda_libraries()
+    s = ort.InferenceSession(onnx_path, sess_options=_session_options(),
+                             providers=["CUDAExecutionProvider", "CPUExecutionProvider"])
+    if s.get_providers()[0] != "CUDAExecutionProvider":
+        raise RuntimeError("CUDA недоступна: перевір драйвер NVIDIA і пакет onnxruntime-gpu "
+                           "(windows/setup.ps1)")
+    return s
+
+
+def split_at_nms(m):
+    """(part before the NonMaxSuppression, the NMS and what follows) of an ONNX model; the
+    tensors that cross the cut are part A's outputs and part B's inputs, in the same order."""
+    import onnx
+    m = onnx.shape_inference.infer_shapes(m)      # the cut tensors need shapes (Extractor)
+    nodes = list(m.graph.node)
+    k = next(i for i, n in enumerate(nodes) if n.op_type == "NonMaxSuppression")
+    before = {o for n in nodes[:k] for o in n.output} | {i.name for i in m.graph.input}
+    inits = {i.name for i in m.graph.initializer}
+    cut = []          # tensors made before the NMS and used by it or after it
+    for n in nodes[k:]:
+        for i in n.input:
+            if i in before and i not in inits and i not in cut:
+                cut.append(i)
+    ex = onnx.utils.Extractor(m)
+    return (ex.extract_model([i.name for i in m.graph.input], cut),
+            ex.extract_model(cut, [o.name for o in m.graph.output]))
+
+
+class SplitDetector:
+    """The person detector (YOLOX) on the GPU, but its NonMaxSuppression step and what follows
+    it on the CPU: ORT's CUDA NonMaxSuppression took 9 of yolox-tiny's 16 ms on a GTX 1060
+    (7 ms without it, the CPU part 0.4 ms). The same model cut in two, so the same boxes
+    (300 recorded frames: max difference 1e-4). On a Mac CoreML has no NMS and ORT already
+    ran that step on the CPU. Looks like an ONNX Runtime session to rtmlib."""
+
+    def __init__(self, onnx_path: str):
+        import onnx
+        import onnxruntime as ort
+
+        static = static_model(onnx_path)
+        a_path, b_path = static.replace(".onnx", ".gpu.onnx"), static.replace(".onnx", ".nms.onnx")
+        with _PREP_LOCK:
+            if not (os.path.exists(a_path) and os.path.exists(b_path)):
+                a, b = split_at_nms(onnx.load(static))
+                _save_atomic(a, a_path)
+                _save_atomic(b, b_path)
+        self.gpu = cuda_session(a_path)
+        self.cpu = ort.InferenceSession(b_path, sess_options=_session_options(),
+                                        providers=["CPUExecutionProvider"])
+        self.cut = [i.name for i in self.cpu.get_inputs()]
+
+    def get_inputs(self):
+        return self.gpu.get_inputs()
+
+    def get_outputs(self):
+        return self.cpu.get_outputs()
+
+    def run(self, output_names, feed):
+        mid = self.gpu.run(self.cut, feed)
+        return self.cpu.run(output_names, dict(zip(self.cut, mid)))
 
 
 @dataclass
@@ -82,14 +206,23 @@ class RTMPoseBackend(PoseBackend):
     pose model.
     """
 
-    VARIANTS = {"s": "lightweight", "m": "balanced", "x": "performance"}
+    _URL = "https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/onnx_sdk/"
+    # Halpe26 (body7) sizes, input w x h. s, m and x are the files of rtmlib's lightweight /
+    # balanced / performance modes. Accuracy and cost (mmpose model zoo, Body8 AUC, GFLOPs):
+    # m 71.9 / 1.95, l 73.2 / 4.19, m384 73.6 / 4.37, l384 74.4 / 9.40, x 74.8 / 17.3.
+    VARIANTS = {
+        "s": ("rtmpose-s_simcc-body7_pt-body7-halpe26_700e-256x192-7f134165_20230605.zip", (192, 256)),
+        "m": ("rtmpose-m_simcc-body7_pt-body7-halpe26_700e-256x192-4d3e73dd_20230605.zip", (192, 256)),
+        "l": ("rtmpose-l_simcc-body7_pt-body7-halpe26_700e-256x192-2abb7558_20230605.zip", (192, 256)),
+        "m384": ("rtmpose-m_simcc-body7_pt-body7-halpe26_700e-384x288-89e6428b_20230605.zip", (288, 384)),
+        "l384": ("rtmpose-l_simcc-body7_pt-body7-halpe26_700e-384x288-734182ce_20230605.zip", (288, 384)),
+        "x": ("rtmpose-x_simcc-body7_pt-body7-halpe26_700e-384x288-7fb6e239_20230606.zip", (288, 384)),
+    }
     # yolox-m costs ~200 ms per call on M3 CPU and causes latency spikes;
     # yolox-tiny is enough to find a single person.
     DETECTORS = {
-        "tiny": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
-                 "onnx_sdk/yolox_tiny_8xb8-300e_humanart-6f3252f9.zip", (416, 416)),
-        "m": ("https://download.openmmlab.com/mmpose/v1/projects/rtmposev1/"
-              "onnx_sdk/yolox_m_8xb8-300e_humanart-c2c7a14a.zip", (640, 640)),
+        "tiny": (_URL + "yolox_tiny_8xb8-300e_humanart-6f3252f9.zip", (416, 416)),
+        "m": (_URL + "yolox_m_8xb8-300e_humanart-c2c7a14a.zip", (640, 640)),
     }
 
     def __init__(self, variant: str = "m", device: str = "cpu",
@@ -99,9 +232,11 @@ class RTMPoseBackend(PoseBackend):
 
         from rtmlib import BodyWithFeet, PoseTracker
 
+        device = resolve_device(device)
         self.name = f"rtmpose-{variant}-halpe26-det{detector}-{device}"
         det_url, det_size = self.DETECTORS[detector]
-        solution = partial(BodyWithFeet, mode=self.VARIANTS[variant],
+        pose_zip, pose_size = self.VARIANTS[variant]
+        solution = partial(BodyWithFeet, pose=self._URL + pose_zip, pose_input_size=pose_size,
                            det=det_url, det_input_size=det_size)
         self.tracker = PoseTracker(
             solution, det_frequency=det_frequency,
@@ -110,6 +245,10 @@ class RTMPoseBackend(PoseBackend):
         if device in COREML_UNITS:
             for model in (self.tracker.det_model, self.tracker.pose_model):
                 model.session = coreml_session(model.session._model_path, device)
+        elif device == "cuda":
+            det, pose = self.tracker.det_model, self.tracker.pose_model
+            det.session = SplitDetector(det.session._model_path)
+            pose.session = cuda_session(static_model(pose.session._model_path))
         elif threads and device == "cpu":
             # By default every ONNX session grabs all cores; with one session
             # per camera they fight each other. Cap threads per session.
@@ -200,7 +339,8 @@ class MediaPipeBackend(PoseBackend):
 
 
 def make_backend(spec: str) -> PoseBackend:
-    """'rtmpose-m:gpu', 'rtmpose-x+detm:cpu', 'mediapipe-full', ...  (devices: cpu, gpu, ane, all)"""
+    """'rtmpose-m:gpu', 'rtmpose-l384:cuda', 'rtmpose-x+detm:cpu', 'mediapipe-full', ...
+    Devices: cpu, gpu (Apple GPU on a Mac, NVIDIA elsewhere), cuda, ane, all."""
     name, _, device = spec.partition(":")
     name, _, det = name.partition("+det")
     family, _, variant = name.partition("-")

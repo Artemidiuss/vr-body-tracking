@@ -17,19 +17,15 @@ import os
 import threading
 import time
 
-import subprocess
-
 import cv2
 
 from fbt.maccam import open_source
+from fbt.system import say
 
 
 def speak(text: str):
-    """Voice cue (macOS `say`, Ukrainian voice) so the user away from the screen knows."""
-    try:
-        subprocess.Popen(["say", "-v", "Lesya", text])
-    except OSError:
-        pass
+    """Voice cue (Ukrainian voice) so the user away from the screen knows."""
+    say(text)
 
 
 def record(hosts, seconds, out_dir=None, countdown=3, voice=False):

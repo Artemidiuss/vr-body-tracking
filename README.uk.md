@@ -17,13 +17,13 @@
 
 | | Що використано тут | Чим можна замінити |
 |---|---|---|
-| Комп'ютер | MacBook Air M3, 8 ГБ | Будь-який Mac на Apple Silicon. Інші ОС — див. [«Не Mac»](#не-mac) |
+| Комп'ютер | MacBook Air M3, 8 ГБ, або ПК з Windows (GTX 1060 3 ГБ, Ryzen 5 1600X) | Будь-який Mac на Apple Silicon або Windows з відеокартою NVIDIA (GTX 10xx і новіші): див. [Windows](#2b-windows-замість-mac) |
 | Камери | Redmi 12 і Galaxy A32 (ширококутні задні камери) | Будь-які два Android 9+ телефони з Camera2 і апаратним H.264 |
-| Третя камера (необов'язково) | вбудована камера MacBook | будь-яка камера, яку бачить macOS |
+| Третя камера (необов'язково) | вбудована камера MacBook або третій телефон (Redmi 9) | будь-яка камера, яку бачить macOS, або будь-який телефон із FBT Cam |
 | Шолом | Quest 3, VRChat standalone | PC VR теж має працювати (OSC той самий), але не перевірявся |
 | Мережа | усі пристрої в одній Wi-Fi | бажано 5 ГГц; телефони можна й кабелем (`adb forward`) |
 
-Програмне: Python 3.11+ (тут 3.12), Xcode Command Line Tools (`swiftc`), Android SDK + JDK 17 (лише щоб зібрати застосунок для телефонів).
+Програмне: Python 3.11+ (тут 3.12), Xcode Command Line Tools (`swiftc`, лише Mac), Android SDK + JDK 17 (лише щоб зібрати застосунок для телефонів). На Windows: [uv](https://docs.astral.sh/uv/) і драйвер NVIDIA, решту ставить скрипт.
 
 ---
 
@@ -92,6 +92,24 @@ macapp/build.sh
 - Шлях до репозиторію вшивається в застосунок, тож папку потім не переносити, або перезібрати.
 - При першому запуску macOS спитає дозвіл на камеру і локальну мережу. Дозволь обидва.
 - Без застосунку: `.venv/bin/python -m fbtapp --browser` відкриє той самий інтерфейс у браузері. Тоді дозвіл на камеру Mac треба дати Terminal.
+
+### 2b. Windows замість Mac
+
+Потрібна відеокарта NVIDIA (GTX 10xx або новіша) зі свіжим драйвером. CUDA і cuDNN окремо ставити не треба: вони приходять як пакети Python.
+
+```bat
+winget install --id astral-sh.uv -e
+git clone <цей репозиторій> fbt
+fbt\windows\setup.cmd
+fbt\windows\FBT.cmd
+```
+
+- `setup.cmd` створює `.venv` з Python 3.12 і CUDA-збіркою ONNX Runtime (`windows/requirements-cuda.txt`, `windows/overrides.txt`), а потім перевіряє, що модель справді рахується на відеокарті. Після оновлення коду запусти його ще раз.
+- `FBT.cmd` запускає хаб у своєму вікні консолі й відкриває інтерфейс окремим вікном Edge. Щоб вийти, закрий консоль.
+- `setup.cmd` ще й кладе ярлик **FBT** на робочий стіл (`windows/shortcut.ps1`): консоль запускається згорнутою, тож видно лише вікно FBT.
+- Версії закріплені під GTX 10xx (Pascal): onnxruntime-gpu 1.26 (остання під CUDA 12) і cuDNN 9.10 (новіші вже не мають коду для Pascal). Новіші відеокарти з ними теж працюють.
+- **Мережа:** зроби Wi-Fi *приватною* (Параметри → Мережа й Інтернет → Wi-Fi → твоя мережа). У *загальнодоступній* мережі Windows Firewall блокує позу шолома, яку надсилає VRChat. Коли Windows спитає, чи дозволити Python доступ до мережі, дозволь.
+- Своєї третьої камери в ПК немає: третім став телефон. Голосові підказки потребують українського голосу в Windows, без нього мовчать.
 
 ### 3. FBT Cam на телефони
 
@@ -220,8 +238,8 @@ cd android/fbtcam
 
 ### Інша модель пози
 
-- `fbt/pose.py`, `make_backend("rtmpose-m:gpu")`. Пристрої: `cpu`, `gpu`, `ane`, `all`.
-- Є також `rtmpose-x` (точніша, повільніша) і `mediapipe-full` (на наших записах слабша).
+- `fbt/pose.py`, `make_backend("rtmpose-m:gpu")`. Пристрої: `cpu`, `gpu` (на Mac — Apple GPU, деінде — NVIDIA), `cuda`, `ane`, `all`.
+- Розміри RTMPose Halpe26: `rtmpose-m` (використовується), `rtmpose-l`, `rtmpose-m384`, `rtmpose-l384`, `rtmpose-x` (точніша, повільніша), а також `mediapipe-full` (на наших записах слабша).
 - Важкі моделі на M3 давали менше кадрів і не кращий результат (порівняння в [ARCHITECTURE.md §21](ARCHITECTURE.md)).
 - Точки тіла — формат Halpe26 (є п'яти і пальці ніг, це важливо для повороту стоп).
 
@@ -232,13 +250,10 @@ cd android/fbtcam
 
 ### Не Mac
 
-- Ядро (`fbt/`) — звичайний Python: OpenCV, ONNX Runtime, SciPy. На Linux/Windows має працювати з `rtmpose-m:cpu` і `python -m fbtapp --browser`. Не перевірялось.
-- Специфічне для macOS:
-  - `macapp/` (вікно застосунку);
-  - `fbt/maccam.py` (камера через AVFoundation);
-  - заряд і нагрів Mac (`pmset`), `caffeinate`, голос (`say`);
-  - прискорення через CoreML.
-- На CPU поза рахується повільніше (~17 мс замість ~5 мс на M3), тож потрібен швидкий процесор.
+- **Windows з відеокартою NVIDIA** працює: див. [2b](#2b-windows-замість-mac). Відеокарта — у `fbt/pose.py` (`cuda_session`, `SplitDetector`), усе від ОС — у `fbt/system.py` (голос, щоб ПК не засинав, батарея, пінг).
+- Лише для macOS: `macapp/` (вікно застосунку), `fbt/maccam.py` (камера через AVFoundation), прискорення через CoreML.
+- Linux: той самий код має працювати з CUDA (`rtmpose-m:cuda`) і `python -m fbtapp --browser`. Не перевірялось.
+- Лише на процесорі детектор і поза займають ~50–120 мс на кадр (Ryzen 5 1600X): для трьох камер замало.
 
 ### Інша гра / шолом
 

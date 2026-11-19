@@ -19,13 +19,13 @@ The full history of decisions, measurements and rejected options is in [ARCHITEC
 
 | | Used here | Can be replaced by |
 |---|---|---|
-| Computer | MacBook Air M3, 8 GB | Any Apple Silicon Mac. Other OSes: see [Not a Mac](#not-a-mac) |
+| Computer | MacBook Air M3, 8 GB, or a Windows PC (GTX 1060 3 GB, Ryzen 5 1600X) | Any Apple Silicon Mac, or Windows with an NVIDIA GPU (GTX 10xx or newer): see [Windows](#2b-windows-instead-of-a-mac) |
 | Cameras | Redmi 12 and Galaxy A32 (ultra-wide rear cameras) | Any two Android 9+ phones with Camera2 and hardware H.264 |
-| Third camera (optional) | the MacBook's built-in camera | any camera macOS can see |
+| Third camera (optional) | the MacBook's built-in camera, or a third phone (Redmi 9) | any camera macOS can see, or any phone with FBT Cam |
 | Headset | Quest 3, VRChat standalone | PC VR should work too (same OSC), but is untested |
 | Network | all devices on one Wi-Fi | 5 GHz preferred; phones can also use a cable (`adb forward`) |
 
-Software: Python 3.11+ (3.12 here), Xcode Command Line Tools (`swiftc`), Android SDK + JDK 17 (only to build the phone app).
+Software: Python 3.11+ (3.12 here), Xcode Command Line Tools (`swiftc`, Mac only), Android SDK + JDK 17 (only to build the phone app). On Windows: [uv](https://docs.astral.sh/uv/) and an NVIDIA driver; the setup script brings the rest.
 
 ---
 
@@ -94,6 +94,24 @@ macapp/build.sh
 - The repository path is baked into the app, so don't move the folder afterwards (or rebuild).
 - On first launch macOS asks for camera and local network permission. Allow both.
 - Without the app: `.venv/bin/python -m fbtapp --browser` opens the same interface in your browser. In that case, give the camera permission to Terminal.
+
+### 2b. Windows instead of a Mac
+
+Needs an NVIDIA GPU (GTX 10xx or newer) with a current driver. CUDA and cuDNN don't have to be installed: they come as Python packages.
+
+```bat
+winget install --id astral-sh.uv -e
+git clone <this repository> fbt
+fbt\windows\setup.cmd
+fbt\windows\FBT.cmd
+```
+
+- `setup.cmd` makes `.venv` with Python 3.12 and the CUDA build of ONNX Runtime (`windows/requirements-cuda.txt`, `windows/overrides.txt`), then checks the model really runs on the GPU. Run it again after pulling changes.
+- `FBT.cmd` starts the hub in its console window and opens the interface as an Edge app window. Close the console to quit.
+- `setup.cmd` also puts an **FBT** shortcut on the desktop (`windows/shortcut.ps1`): the console starts minimised, so only the FBT window shows.
+- Versions are pinned for GTX 10xx (Pascal): onnxruntime-gpu 1.26 (the last one for CUDA 12) and cuDNN 9.10 (newer ones no longer have Pascal kernels). Newer cards run them too.
+- **Network:** set your Wi-Fi to *Private* (Settings → Network & Internet → Wi-Fi → your network). On a *Public* network Windows Firewall blocks the headset pose VRChat sends. When Windows asks whether Python may use the network, allow it.
+- No third camera of its own: use a third phone. Voice alerts need a Ukrainian voice in Windows; without one they stay silent.
 
 ### 3. FBT Cam on the phones
 
@@ -222,8 +240,8 @@ Everything applies immediately, even mid-game. Saved in `data/app_settings.json`
 
 ### Another pose model
 
-- `fbt/pose.py`, `make_backend("rtmpose-m:gpu")`. Devices: `cpu`, `gpu`, `ane`, `all`.
-- Also available: `rtmpose-x` (more accurate, slower) and `mediapipe-full` (weaker on our recordings).
+- `fbt/pose.py`, `make_backend("rtmpose-m:gpu")`. Devices: `cpu`, `gpu` (Apple GPU on a Mac, NVIDIA elsewhere), `cuda`, `ane`, `all`.
+- RTMPose Halpe26 sizes: `rtmpose-m` (used), `rtmpose-l`, `rtmpose-m384`, `rtmpose-l384`, `rtmpose-x` (more accurate, slower), plus `mediapipe-full` (weaker on our recordings).
 - Heavier models on the M3 gave fewer frames and no better result (comparison in [ARCHITECTURE.md §21](ARCHITECTURE.md)).
 - Keypoints use the Halpe26 format (it has heels and toes, which matters for foot rotation).
 
@@ -234,13 +252,10 @@ Everything applies immediately, even mid-game. Saved in `data/app_settings.json`
 
 ### Not a Mac
 
-- The core (`fbt/`) is plain Python: OpenCV, ONNX Runtime, SciPy. On Linux/Windows it should work with `rtmpose-m:cpu` and `python -m fbtapp --browser`. Untested.
-- macOS-specific parts:
-  - `macapp/` (the app window);
-  - `fbt/maccam.py` (camera via AVFoundation);
-  - Mac battery and heat (`pmset`), `caffeinate`, voice (`say`);
-  - CoreML acceleration.
-- On the CPU the pose runs slower (~17 ms instead of ~5 ms on the M3), so you need a fast processor.
+- **Windows with an NVIDIA GPU** works: see [2b](#2b-windows-instead-of-a-mac). The GPU part is in `fbt/pose.py` (`cuda_session`, `SplitDetector`), the OS part in `fbt/system.py` (voice, keeping the PC awake, battery, ping).
+- macOS-only parts: `macapp/` (the app window), `fbt/maccam.py` (camera via AVFoundation), CoreML acceleration.
+- Linux: the same code should run with CUDA (`rtmpose-m:cuda`) and `python -m fbtapp --browser`. Untested.
+- On a CPU only, the detector + pose take ~50–120 ms per frame on a Ryzen 5 1600X: too slow for three cameras.
 
 ### Another game / headset
 
