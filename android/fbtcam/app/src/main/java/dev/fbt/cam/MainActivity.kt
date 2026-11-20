@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.os.BatteryManager
 import android.os.PowerManager
+import android.os.SystemClock
 import android.graphics.Color
 import android.graphics.SurfaceTexture
 import android.os.Build
@@ -28,9 +29,12 @@ import org.json.JSONObject
 import java.net.NetworkInterface
 
 /**
- * Minimal UI: pick camera + mode, the stream starts automatically and keeps
- * running while the app is open (screen stays on). The Mac connects to
- * <phone IP>:5000 or via `adb forward tcp:5000 tcp:5000`.
+ * Minimal UI: pick camera + mode, the stream starts automatically. The camera works only while
+ * FBT is connected: with no viewer for STANDBY_S (FBT asleep or closed, PC off, Wi-Fi gone) the
+ * camera and encoder stop and the screen goes almost dark; the next connection starts them again
+ * (~1-2 s, then ~3 s of light metering). The app stays open, the screen on: Android does not
+ * let an app open the camera with the screen off, and MIUI / One UI kill background apps.
+ * The Mac connects to <phone IP>:5000 or via `adb forward tcp:5000 tcp:5000`.
  */
 class MainActivity : Activity() {
     private val port = 5000
@@ -52,6 +56,10 @@ class MainActivity : Activity() {
     private var lastFrames = 0L
     private var lastBytes = 0L
     private var lastEnc = 0L
+    private var encFps = 0L
+    private var sentFps = 0L
+    private var standby = false
+    private var lastViewer = SystemClock.elapsedRealtime()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -177,10 +185,20 @@ class MainActivity : Activity() {
             put("thermal", thermal)
             gravity.json()?.let { put("gravity", it) }
             streamer?.exposureJson()?.let { put("exposure", it) }
+            // What the phone itself sees of the stream: frames out of the encoder and onto the
+            // network per second, and capture -> encoded latency (the rest of the hub's latency is Wi-Fi).
+            put("stream", JSONObject().apply {
+                put("enc_fps", encFps); put("sent_fps", sentFps)
+                streamer?.medianEncodeLatencyMs()?.let { put("enc_ms", Math.round(it)) }
+                put("dropped", server?.dropped ?: 0)
+            })
         }.toString().toByteArray()
     }
 
-    private fun restart() {
+    /** Start the camera with the chosen camera / mode. keepViewer: waking from standby for the
+     *  viewer that just connected (same camera and mode: its HELLO and clock stay valid, the new
+     *  encoder's SPS/PPS go out before the first frame); otherwise the viewer reconnects. */
+    private fun restart(keepViewer: Boolean = false) {
         if (modes.isEmpty()) return
         if (showPreview && !texture.isAvailable) return  // wait for the preview surface
         streamer?.stop()
@@ -194,10 +212,15 @@ class MainActivity : Activity() {
         prefs.edit().putBoolean("template_preview", cfg.previewTemplate).putBoolean("oprate_max", cfg.maxOperatingRate).apply()
         prefs.edit().putString("cam", cfg.cam.id).putString("mode_${cfg.cam.id}", modeKey(cfg)).apply()
         val st = if (showPreview) texture.surfaceTexture?.apply { setDefaultBufferSize(cfg.width, cfg.height) } else null
-        server?.config = null
-        server?.resetClockDetection()
-        server?.hello = helloJson(cfg).toByteArray()
-        server?.dropViewer()
+        if (!keepViewer) {
+            server?.config = null
+            server?.resetClockDetection()
+            server?.hello = helloJson(cfg).toByteArray()
+            server?.dropViewer()
+        }
+        standby = false
+        lastViewer = SystemClock.elapsedRealtime()
+        window.attributes = window.attributes.apply { screenBrightness = if (dimmed) 0.01f else -1f }
         val noPreview = !showPreview || intent?.getBooleanExtra("nopreview", false) == true
         streamer = CameraStreamer(this, cfg, if (noPreview || st == null) null else Surface(st),
             onConfig = { server?.config = it },
@@ -232,6 +255,12 @@ class MainActivity : Activity() {
                 lastFrames = s.sentFrames; lastBytes = s.sentBytes
                 st?.onGravityTick()
                 val enc = st?.encodedFrames ?: 0
+                encFps = if (st != null) maxOf(0L, enc - lastEnc) else 0; sentFps = fps
+                val now = SystemClock.elapsedRealtime()
+                if (s.connected) lastViewer = now
+                if (st != null && !s.connected && now - lastViewer > STANDBY_S * 1000) { enterStandby(); return }
+                if (standby && s.connected) { log("FBT під'єднався: вмикаю камеру"); restart(keepViewer = true); ui.postDelayed(this, 1000); return }
+                if (standby) { ui.postDelayed(this, 1000); return }
                 android.util.Log.i("FBTCAM", "stats encoded/s=${enc - lastEnc} sent/s=$fps kbps=$kbps dropped=${s.dropped} capture->encoded=${st?.medianEncodeLatencyMs()?.let { "%.0f".format(it) } ?: "-"}ms")
                 lastEnc = enc
                 status.text = "${ips().joinToString { "$it:$port" }}\n" +
@@ -249,10 +278,21 @@ class MainActivity : Activity() {
             .filter { it is java.net.Inet4Address }.map { it.hostAddress!! }
     } catch (_: Exception) { emptyList() }
 
+    private fun enterStandby() {
+        streamer?.stop()
+        streamer = null
+        lastEnc = 0
+        standby = true
+        window.attributes = window.attributes.apply { screenBrightness = 0.01f }
+        status.text = "${ips().joinToString { "$it:$port" }}\n◌ Очікування: камера вимкнена, доки FBT не під'єднається"
+        log("FBT немає ${STANDBY_S} с: камера вимкнена")
+        ui.postDelayed(statsTick, 1000)
+    }
+
     private var dimmed = false
     private fun toggleDim() {
         dimmed = !dimmed
-        window.attributes = window.attributes.apply { screenBrightness = if (dimmed) 0.01f else -1f }
+        if (!standby) window.attributes = window.attributes.apply { screenBrightness = if (dimmed) 0.01f else -1f }
     }
 
     private fun log(s: String) {
@@ -270,5 +310,9 @@ class MainActivity : Activity() {
         server?.stop()
         ui.removeCallbacks(statsTick)
         super.onDestroy()
+    }
+
+    private companion object {
+        const val STANDBY_S = 10        // no FBT connected this long: camera off
     }
 }

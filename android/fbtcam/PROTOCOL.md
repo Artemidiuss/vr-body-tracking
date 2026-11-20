@@ -28,7 +28,7 @@ everything — video, metadata and clock sync — goes through the same socket.
 | 3 PING | Mac→phone | Mac time, ns | empty |
 | 4 PONG | phone→Mac | Mac time echoed, ns | 8 bytes: phone clock, ns (same clock as FRAME ts) |
 | 5 KEYFRAME_REQ | Mac→phone | 0 | empty |
-| 6 STATUS | phone→Mac | 0 | UTF-8 JSON: battery (%), charging, plugged, temp_c (battery), thermal (Android thermal status 0–6, −1 unknown), gravity {v: [x, y, z] m/s² mean of the last 2 s in device axes (X right, Y up, Z out of the screen; points up), sd_deg: spread of the samples, n}. exposure {ms, iso, held}: the current exposure and whether it is held. Sent on every PING (once a second). Older receivers ignore it |
+| 6 STATUS | phone→Mac | 0 | UTF-8 JSON: battery (%), charging, plugged, temp_c (battery), thermal (Android thermal status 0–6, −1 unknown), gravity {v: [x, y, z] m/s² mean of the last 2 s in device axes (X right, Y up, Z out of the screen; points up), sd_deg: spread of the samples, n}. exposure {ms, iso, held}: the current exposure and whether it is held. stream {enc_fps, sent_fps, enc_ms, dropped}: frames out of the encoder / onto the socket in the last second, median capture -> encoded latency (ms, phone clock), frames skipped so far; the hub's capture -> received latency minus enc_ms is the Wi-Fi. Sent on every PING (once a second). Older receivers ignore it |
 | 7 EXPOSURE | Mac→phone | 0 | empty. Meter the light again (auto exposure for ~3 s), then hold it: the same brightness (median exposure × ISO of the last 1.5 s) at 10/20/30 ms, white balance held too. The phone also does this by itself when the camera starts and when the phone was turned (gravity direction > 2° from where it pointed when metered, then still). Older phones ignore it |
 
 ## Clock sync
@@ -45,3 +45,11 @@ used to synchronise cameras and to measure latency continuously.
   behind it drops frames until the next keyframe and forces one.
 - Frames are sent landscape as the sensor produces them; rotation to portrait
   is done on the Mac (`sensor_orientation` in HELLO).
+
+## Standby
+
+The camera runs only while a viewer is connected. With no viewer for 10 s the camera and the
+encoder stop and the screen goes almost dark (the app stays in front, screen on). The next
+connection gets HELLO at once; the camera starts (~1-2 s) and the new encoder's CONFIG goes out
+before its first FRAME. Viewers keep reconnecting as before (the hub retries every ~2 s and drops
+a connection with no frames for 5 s, which the restart stays well within).

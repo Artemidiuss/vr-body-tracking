@@ -10,8 +10,8 @@ android {
         applicationId = "dev.fbt.cam"
         minSdk = 28
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1"
+        versionCode = 2
+        versionName = "0.2"
     }
     // Vendors reveal ultra-wide lenses only to allow-listed package names
     // (verified 2026-11-14). For personal sideloading only, never publish

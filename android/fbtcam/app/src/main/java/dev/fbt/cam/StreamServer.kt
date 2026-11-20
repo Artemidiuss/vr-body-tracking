@@ -105,13 +105,21 @@ class StreamServer(
         private var seq = 0
         private var lastStatus = 0L
 
+        private var configSent: ByteArray? = null
+
         private val writer = Thread({
             try {
                 write(Packet(Proto.HELLO, 0, 0, 0, hello))
-                config?.let { write(Packet(Proto.CONFIG, 0, 0, 0, it)) }
+                config?.let { write(Packet(Proto.CONFIG, 0, 0, 0, it)); configSent = it }
                 onKeyframeNeeded()
                 while (alive) {
                     val p = q.poll(500, TimeUnit.MILLISECONDS) ?: continue
+                    // The camera may start after the viewer connected (standby): the encoder's
+                    // SPS/PPS then arrive later and go out before its first frame.
+                    val c = config
+                    if (p.type == Proto.FRAME && c != null && c !== configSent) {
+                        write(Packet(Proto.CONFIG, 0, 0, 0, c)); configSent = c
+                    }
                     write(p)
                     if (p.type == Proto.FRAME) { sentFrames++; sentBytes += p.payload.size }
                 }

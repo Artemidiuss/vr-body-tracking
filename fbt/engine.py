@@ -1021,6 +1021,9 @@ class Engine:
                                   f"{np.median(s.src.latency_ms[-30:]) if s.src and s.src.latency_ms else 0:3.0f}"
                                   + (f" exp {e['ms']}ms/{e['iso']}{'' if e.get('held') else ' auto'}"
                                      if (e := s.status().get("exposure")) else "")
+                                  # the phone's own view: encoder frames/s, capture -> encoded (lat - this = Wi-Fi)
+                                  + (f" enc {x.get('enc_fps')}/s {x.get('enc_ms', '-')} ms"
+                                     if (x := s.status().get("stream")) else "")
                                   for s in self.slots)
                 try:
                     self._statsf.write(f"{time.strftime('%H:%M:%S')} 3D {self.fps3d:4.1f} fps | {cams} | "
