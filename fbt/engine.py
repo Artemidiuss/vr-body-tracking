@@ -494,11 +494,14 @@ class TrackerOutput:
         # predicted: VRChat re-anchors all trackers to it every frame.
         Su = to_unity(S)
         sp = Su[IDX["neck"]] - Su[IDX["hip"]]
-        root = (Su[IDX["left_ear"]] + Su[IDX["right_ear"]]) / 2 - 0.04 * sp / np.linalg.norm(sp)
+        ears = (Su[IDX["left_ear"]] + Su[IDX["right_ear"]]) / 2
+        root = ears - 0.04 * sp / np.linalg.norm(sp)
         al, hmd = self.align, self.hmd
-        self._q_root = root.copy()
+        # The link to the headset takes the ear midpoint (its own 4 cm go along the head, not the
+        # spine) and learns only with the torso upright (§46).
+        self._q_root = ears.copy()
         if al is not None and hmd is not None and hmd.fresh:
-            al.add(t_ref, root.copy(), hmd.pose_at)
+            al.add(t_ref, ears.copy(), hmd.pose_at, upright=bool(sp[1] > np.cos(np.radians(35)) * np.linalg.norm(sp)))
         root = self.head_euro(root, t_ref)
         pos = self.head_pred(root[None, :], t_ref)[0]
         ear = Su[IDX["right_ear"]] - Su[IDX["left_ear"]]

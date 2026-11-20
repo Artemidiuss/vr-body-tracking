@@ -1,16 +1,18 @@
 """Our camera space -> VRChat's tracking space, from the headset pose VRChat sends.
 
 Model (both spaces in Unity coordinates: y up, left-handed):
-    p_hmd(t) = Ry(yaw) * q_root(t) + t0 + R_hmd(t) * d
-q_root: our head root from the cameras (ear midpoint, 4 cm down the spine);
-d: the headset point relative to that root, in the headset's own frame (eyes are
-~6 cm above and ~8 cm in front of it, measured). No scale: our metres come from the
+    p_hmd(t) = Ry(yaw) * q(t) + t0 + R_hmd(t) * d
+q: the ear midpoint from the cameras; d: the headset point relative to it, in the headset's
+own frame (~2 cm above and ~9 cm in front, measured). The head root VRChat gets is 4 cm below
+the ear midpoint in the head's frame. It used to be 4 cm down the spine, which is the same
+point standing; lying propped up the head is bent ~60 deg to the spine, and that point sat
+4-5 cm off the head (§46). No scale: our metres come from the
 calibration (the height setting). Learned during play, the scale wandered 0.93-1.10 and
 every 1% of it moved the feet ~1.5 cm against the head: bent legs (ARCHITECTURE.md §29).
 
 A T-pose sets it at once (reset_from_pose); a background fit over
-the last ~40 s of pairs, taken only while the headset moves with our head,
-refines it slowly, and corrects a link that is clearly wrong (a Quest recenter, a T-pose
+the pairs since VRChat's space last moved (up to 15 min), taken only while the headset moves with our head and the torso is
+upright, refines it slowly, and corrects a link that is clearly wrong (a Quest recenter, a T-pose
 taken with the head turned) once the data show it. With it the trackers are sent already
 in VRChat space and the head anchor is the real headset: on our recordings the feet
 standing on the floor slid about half as much in VRChat as with the camera head (§23).
@@ -49,7 +51,12 @@ def unity_R(euler_deg) -> np.ndarray:
 
 class HmdAlign:
     LAG = -0.06          # our stabilised head trails the headset by ~60 ms (filter), measured
-    WINDOW = 40.0        # s of pairs used for a fit
+    # s of pairs a fit uses. The link is constant until VRChat's space moves, so in effect all
+    # upright pairs since the last move (a followed recenter re-expresses them, a T-pose clears
+    # them, a lost link drops the ones before), capped. 40 s windows scattered the yaw +-5 deg
+    # sitting, and whatever yaw one lay down with stayed (§46).
+    WINDOW = 900.0
+    FIT_PAIRS = 4500     # at most this many, evenly spread, go into one fit (~0.4 s)
     WORN_ERR = 0.10      # m: pairs further than this from the link are not learned from
 
     def __init__(self):
@@ -72,7 +79,8 @@ class HmdAlign:
         self.lock = threading.Lock()
 
     # ---------------- data
-    D0 = np.array([0.0, 0.06, 0.09])   # headset vs head root before the first fit (measured)
+    D0 = np.array([0.0, 0.02, 0.09])   # headset vs ear midpoint before the first fit (measured)
+    ROOT_BELOW_EARS = 0.04             # m: the head root VRChat gets, below the ear midpoint (head frame)
 
     def _motion(self, t_cap, q, root):
         """How far our head root and the headset's head root moved in the last 1.5 s.
@@ -87,9 +95,12 @@ class HmdAlign:
         P = np.array([r[2] for r in self._recent])
         return float(np.ptp(Q, axis=0).max()), float(np.ptp(P, axis=0).max())
 
-    def add(self, t_cap: float, q_root: np.ndarray, hmd_at) -> None:
-        """q_root: our head root (Unity frame) at capture time t_cap.
-        hmd_at(t) -> (position(3), euler(3)) or None."""
+    def add(self, t_cap: float, q_root: np.ndarray, hmd_at, upright: bool = True) -> None:
+        """q_root: our ear midpoint (Unity frame) at capture time t_cap.
+        hmd_at(t) -> (position(3), euler(3)) or None.
+        upright: the torso within 35 deg of vertical. Only those pairs are learned from: lying,
+        the cameras' head is 4-7 cm off and the player barely moves, so fits there put the body
+        11-17 cm off (§46). Lying, the link changes only with VRChat's space (headset_sample)."""
         h = hmd_at(t_cap + self.LAG)
         if h is None:
             return
@@ -122,11 +133,17 @@ class HmdAlign:
                 if r >= self.WORN_ERR:
                     # On the head but off the link (the headset space was recentred, or the
                     # link is wrong): after 5 s the app asks for a T-pose. The pair is still
-                    # learned from, so the fit can find the new link by itself (maybe_fit).
+                    # learned from, so the fit can find the new link by itself (maybe_fit);
+                    # the pairs from before are of the old link and go (the window is long).
                     self._bad_since = self._bad_since or t_cap
-                    self.lost = t_cap - self._bad_since > 5.0
+                    if not self.lost and t_cap - self._bad_since > 5.0:
+                        self.lost = True
+                        while self.pairs and self.pairs[0][0] < self._bad_since:
+                            self.pairs.popleft()
                 else:
                     self._bad_since, self.lost = None, False
+            if not upright:
+                return
             self.pairs.append((t_cap, q, p, R))
             while self.pairs and t_cap - self.pairs[0][0] > self.WINDOW:
                 self.pairs.popleft()
@@ -210,9 +227,10 @@ class HmdAlign:
         return float(np.degrees(self.x[0]))
 
     def head_root(self, p_hmd, euler) -> np.ndarray:
-        """The real head root in VRChat space from a headset pose."""
+        """The real head root in VRChat space from a headset pose (ROOT_BELOW_EARS under the
+        ear midpoint)."""
         _, _, _, d = self._unpack(self.x)
-        return np.asarray(p_hmd, float) - unity_R(euler) @ d
+        return np.asarray(p_hmd, float) - unity_R(euler) @ (d + [0.0, self.ROOT_BELOW_EARS, 0.0])
 
     # ---------------- reset from a T-pose
     def reset_from_pose(self, q_root, facing_yaw_deg: float, p_hmd, euler_hmd) -> None:
@@ -242,7 +260,7 @@ class HmdAlign:
             return False
         self._last_fit = now
         with self.lock:
-            pairs = list(self.pairs)
+            pairs = list(self.pairs)[::max(1, -(-len(self.pairs) // self.FIT_PAIRS))]
             x_in_use = None if self.x is None else self.x.copy()
             resets = self._resets
         if len(pairs) < 150:
@@ -250,8 +268,10 @@ class HmdAlign:
         q = np.array([p[1] for p in pairs])
         P = np.array([p[2] for p in pairs])
         Rh = np.array([p[3] for p in pairs])
-        # the fit needs movement: a still player cannot tell yaw from offset
-        move = max(np.ptp(P[:, [0, 2]], axis=0).max(), np.ptp(q[:, [0, 2]], axis=0).max())
+        # The fit needs the head to travel: a still player cannot tell yaw from offset. Our head
+        # root only: turning the head on the spot swings the headset 15+ cm and told the fit
+        # nothing, and sitting the yaw crept 2-4 deg a fit (game 19.11 23:23: 12 deg in a minute, §46).
+        move = float(np.ptp(q[:, [0, 2]], axis=0).max())
         if move < 0.15:
             return False
 
@@ -266,8 +286,8 @@ class HmdAlign:
             return (pred(y) - P).ravel()
 
         # plausible people: the headset sits in front of and above the ear midpoint, roughly centred
-        lo = [-np.inf, -np.inf, -np.inf, -np.inf, -0.02, -0.03, -0.02]
-        hi = [np.inf, np.inf, np.inf, np.inf, 0.02, 0.16, 0.18]
+        lo = [-np.inf, -np.inf, -np.inf, -np.inf, -0.02, -0.07, -0.02]
+        hi = [np.inf, np.inf, np.inf, np.inf, 0.02, 0.12, 0.18]
         cur = None if x_in_use is None else float(np.median(np.linalg.norm(
             pred(np.r_[x_in_use[:4], x_in_use[5:]]) - P, axis=1)))
         starts = [] if x_in_use is None else [np.r_[x_in_use[:4], x_in_use[5:]]]
@@ -290,10 +310,12 @@ class HmdAlign:
             if self.x is not None:
                 big = (abs(np.angle(np.exp(1j * (new[0] - self.x[0])))) > np.radians(5)
                        or np.linalg.norm(new[1:4] - self.x[1:4]) > 0.1)
-                # A big change only when the last 40 s clearly show the link in use is wrong
+                # A big change only when the window clearly shows the link in use is wrong
                 # (a Quest recenter, a T-pose taken with the head turned): the new link explains
                 # them within 3 cm, the old one at least twice worse, and the player walked
                 # enough for the yaw to be certain. tick() glides it in over a few seconds.
+                # Not even for a lost link: a yaw from 15 cm of travel was 15 deg off, and lying
+                # down next kept it for 5 min (§46). Lost, the app asks for a T-pose.
                 if big and not (err < 0.03 and cur > max(0.04, 2 * err) and move >= self.MOVE_BIG):
                     return False
             self.target = new
