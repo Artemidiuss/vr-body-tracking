@@ -30,7 +30,7 @@ import java.net.NetworkInterface
 
 /**
  * Minimal UI: pick camera + mode, the stream starts automatically. The camera works only while
- * FBT is connected: with no viewer for STANDBY_S (FBT asleep or closed, PC off, Wi-Fi gone) the
+ * FBT is connected (or the video is shown, for aiming): with no viewer for STANDBY_S (FBT asleep or closed, PC off, Wi-Fi gone) the
  * camera and encoder stop and the screen goes almost dark; the next connection starts them again
  * (~1-2 s, then ~3 s of light metering). The app stays open, the screen on: Android does not
  * let an app open the camera with the screen off, and MIUI / One UI kill background apps.
@@ -258,7 +258,8 @@ class MainActivity : Activity() {
                 encFps = if (st != null) maxOf(0L, enc - lastEnc) else 0; sentFps = fps
                 val now = SystemClock.elapsedRealtime()
                 if (s.connected) lastViewer = now
-                if (st != null && !s.connected && now - lastViewer > STANDBY_S * 1000) { enterStandby(); return }
+                // Not while the video is shown: the phone is being aimed, maybe with FBT not open yet.
+                if (st != null && !s.connected && !showPreview && now - lastViewer > STANDBY_S * 1000) { enterStandby(); return }
                 if (standby && s.connected) { log("FBT під'єднався: вмикаю камеру"); restart(keepViewer = true); ui.postDelayed(this, 1000); return }
                 if (standby) { ui.postDelayed(this, 1000); return }
                 android.util.Log.i("FBTCAM", "stats encoded/s=${enc - lastEnc} sent/s=$fps kbps=$kbps dropped=${s.dropped} capture->encoded=${st?.medianEncodeLatencyMs()?.let { "%.0f".format(it) } ?: "-"}ms")

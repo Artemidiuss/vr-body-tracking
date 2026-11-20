@@ -48,7 +48,7 @@ used to synchronise cameras and to measure latency continuously.
 
 ## Standby
 
-The camera runs only while a viewer is connected. With no viewer for 10 s the camera and the
+The camera runs only while a viewer is connected, or while the video is shown on the phone (aiming it). With no viewer for 10 s the camera and the
 encoder stop and the screen goes almost dark (the app stays in front, screen on). The next
 connection gets HELLO at once; the camera starts (~1-2 s) and the new encoder's CONFIG goes out
 before its first FRAME. Viewers keep reconnecting as before (the hub retries every ~2 s and drops
