@@ -30,6 +30,10 @@ UI = os.path.join(os.path.dirname(__file__), "ui")
 TYPES = {".html": "text/html; charset=utf-8", ".js": "application/javascript; charset=utf-8",
          ".css": "text/css; charset=utf-8", ".png": "image/png", ".svg": "image/svg+xml"}
 ENGINE: Engine | None = None
+# The newest video stream per (page, camera). An older one of the same page ends: a browser holds
+# at most 6 connections per host, and streams of removed tiles left a new tile black and the page
+# unable even to reload (21.11).
+VIDEO_GEN: dict[tuple[str, int], int] = {}
 PAGES, PAGE_T, PAGES_LOCK = 0, 0.0, threading.Lock()    # open UI pages (their /events streams), when the last one went
 
 
@@ -99,7 +103,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/events":
                 self._events()
             elif path.startswith("/video/"):
-                self._video(int(path.split("/")[2]))
+                q = dict(kv.split("=", 1) for kv in self.path.partition("?")[2].split("&") if "=" in kv)
+                self._video(int(path.split("/")[2]), q.get("p", ""))
             else:
                 self._send(404, b"not found", "text/plain")
         except ConnectionError:         # the window closed mid-reply (Windows: ConnectionAbortedError)
@@ -135,14 +140,16 @@ class Handler(BaseHTTPRequestHandler):
                 PAGES -= 1
                 PAGE_T = time.perf_counter()
 
-    def _video(self, i: int):
+    def _video(self, i: int, page: str = ""):
         self.send_response(200)
         self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "close")
         self.end_headers()
         last_id, t_last = None, 0.0
-        while ENGINE.mode == "setup":
+        with PAGES_LOCK:
+            gen = VIDEO_GEN[(page, i)] = VIDEO_GEN.get((page, i), 0) + 1
+        while ENGINE.mode == "setup" and VIDEO_GEN.get((page, i)) == gen:
             slots = ENGINE.slots
             if i >= len(slots):
                 return

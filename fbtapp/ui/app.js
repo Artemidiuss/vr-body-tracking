@@ -24,6 +24,12 @@ function toast(msg) {
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
 // ---------------------------------------------------------------- helpers
+const PAGE_ID = Math.random().toString(36).slice(2);   // the hub keeps one video stream per camera per page
+function stopVideo(img) {
+  // Pointing the <img> elsewhere ends its MJPEG request (removing the element or its src does not).
+  img.src = "data:image/gif;base64,R0lGODlhAQABAAAAACw=";
+  img.dataset.on = "0";
+}
 function camOrder(st) {
   // Tiles in the order the user sees them standing in front of the table:
   // the phone on the user's left first, the MacBook in the middle.
@@ -105,6 +111,10 @@ function renderSetup() {
   const key = order.map(i => S.cams[i].host).join("|");
   if (key !== tilesKey) {
     tilesKey = key;
+    // Stop the old streams first: a removed <img> keeps its MJPEG connection open in WebView2,
+    // and with at most 6 connections per host a new tile stayed black (21.11: a calibration
+    // swapped the phones' order, so the tiles were rebuilt).
+    for (const im of document.querySelectorAll("#videos img")) stopVideo(im);
     $("#videos").innerHTML = order.map(i => `
       <div class="tile ${S.cams[i].mac ? "mac" : "phone"}" data-i="${i}">
         <img alt="">
@@ -117,8 +127,8 @@ function renderSetup() {
     const i = +el.dataset.i, c = S.cams[i];
     if (!c) continue;
     const img = $("img", el), on = c.state === "online";
-    if (on && img.dataset.on !== "1") { img.src = `/video/${i}?t=${Date.now()}`; img.dataset.on = "1"; }
-    if (!on && img.dataset.on === "1") { img.removeAttribute("src"); img.dataset.on = "0"; }
+    if (on && img.dataset.on !== "1") { img.src = `/video/${i}?p=${PAGE_ID}&t=${Date.now()}`; img.dataset.on = "1"; }
+    if (!on && img.dataset.on === "1") stopVideo(img);
     $(".off", el).classList.toggle("hidden", on);
     $(".off b", el).textContent = c.state === "connecting" ? "Підключаюсь…" : "Не в мережі";
     $(".off span", el).textContent = c.state === "connecting" ? c.name : offlineHelp(c);
