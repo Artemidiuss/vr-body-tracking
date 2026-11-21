@@ -2,11 +2,13 @@
 
 Model (both spaces in Unity coordinates: y up, left-handed):
     p_hmd(t) = Ry(yaw) * q(t) + t0 + R_hmd(t) * d
-q: the ear midpoint from the cameras; d: the headset point relative to it, in the headset's
-own frame (~2 cm above and ~9 cm in front, measured). The head root VRChat gets is 4 cm below
-the ear midpoint in the head's frame. It used to be 4 cm down the spine, which is the same
-point standing; lying propped up the head is bent ~60 deg to the spine, and that point sat
-4-5 cm off the head (§46). No scale: our metres come from the
+q: our head root from the cameras, the ear midpoint 4 cm straight down (world vertical);
+d: the headset point relative to it, in the headset's own frame (~6 cm above and ~9 cm in
+front, measured). It used to be 4 cm down the spine: the same point standing, but lying
+propped up the head is bent ~60 deg to the spine and that point slid 4-5 cm off the head (§46).
+A constant world offset changes no fit, only the height the trackers get, which stays as it
+was (taking the ear midpoint itself sent everything 4 cm lower: feet under the floor, 21.11).
+No scale: our metres come from the
 calibration (the height setting). Learned during play, the scale wandered 0.93-1.10 and
 every 1% of it moved the feet ~1.5 cm against the head: bent legs (ARCHITECTURE.md §29).
 
@@ -79,8 +81,7 @@ class HmdAlign:
         self.lock = threading.Lock()
 
     # ---------------- data
-    D0 = np.array([0.0, 0.02, 0.09])   # headset vs ear midpoint before the first fit (measured)
-    ROOT_BELOW_EARS = 0.04             # m: the head root VRChat gets, below the ear midpoint (head frame)
+    D0 = np.array([0.0, 0.06, 0.09])   # headset vs head root before the first fit (measured)
 
     def _motion(self, t_cap, q, root):
         """How far our head root and the headset's head root moved in the last 1.5 s.
@@ -96,7 +97,7 @@ class HmdAlign:
         return float(np.ptp(Q, axis=0).max()), float(np.ptp(P, axis=0).max())
 
     def add(self, t_cap: float, q_root: np.ndarray, hmd_at, upright: bool = True) -> None:
-        """q_root: our ear midpoint (Unity frame) at capture time t_cap.
+        """q_root: our head root (Unity frame) at capture time t_cap.
         hmd_at(t) -> (position(3), euler(3)) or None.
         upright: the torso within 35 deg of vertical. Only those pairs are learned from: lying,
         the cameras' head is 4-7 cm off and the player barely moves, so fits there put the body
@@ -227,10 +228,9 @@ class HmdAlign:
         return float(np.degrees(self.x[0]))
 
     def head_root(self, p_hmd, euler) -> np.ndarray:
-        """The real head root in VRChat space from a headset pose (ROOT_BELOW_EARS under the
-        ear midpoint)."""
+        """The real head root in VRChat space from a headset pose."""
         _, _, _, d = self._unpack(self.x)
-        return np.asarray(p_hmd, float) - unity_R(euler) @ (d + [0.0, self.ROOT_BELOW_EARS, 0.0])
+        return np.asarray(p_hmd, float) - unity_R(euler) @ d
 
     # ---------------- reset from a T-pose
     def reset_from_pose(self, q_root, facing_yaw_deg: float, p_hmd, euler_hmd) -> None:
@@ -286,8 +286,8 @@ class HmdAlign:
             return (pred(y) - P).ravel()
 
         # plausible people: the headset sits in front of and above the ear midpoint, roughly centred
-        lo = [-np.inf, -np.inf, -np.inf, -np.inf, -0.02, -0.07, -0.02]
-        hi = [np.inf, np.inf, np.inf, np.inf, 0.02, 0.12, 0.18]
+        lo = [-np.inf, -np.inf, -np.inf, -np.inf, -0.02, -0.03, -0.02]
+        hi = [np.inf, np.inf, np.inf, np.inf, 0.02, 0.16, 0.18]
         cur = None if x_in_use is None else float(np.median(np.linalg.norm(
             pred(np.r_[x_in_use[:4], x_in_use[5:]]) - P, axis=1)))
         starts = [] if x_in_use is None else [np.r_[x_in_use[:4], x_in_use[5:]]]

@@ -20,10 +20,10 @@ def test_recovers_transform_and_head_offset():
     assert al.ready and al.err < 0.02
     assert al.x[4] == 0.0                                    # the scale is our calibration's (§29)
     assert abs((al.yaw_deg() - 201.0 + 180) % 360 - 180) < 1.0
-    # the head root it reports: the ear midpoint (headset pose minus the offset), 4 cm lower in the head
+    # the head root it reports is the real one (headset pose minus the offset)
     p, e = poses[max(poses)]
     root = al.head_root(p, e)
-    assert np.linalg.norm(root - (p - unity_R(e) @ (d + [0, al.ROOT_BELOW_EARS, 0]))) < 0.03
+    assert np.linalg.norm(root - (p - unity_R(e) @ d)) < 0.03
 
 
 def test_glides_instead_of_jumping():
@@ -82,7 +82,7 @@ def test_no_big_correction_without_walking():
     the link, so not lost) is not taken."""
     rng = np.random.default_rng(2)
     al, poses = HmdAlign(), {}
-    d = np.array([0.0, 0.02, 0.09])
+    d = np.array([0.0, 0.06, 0.09])
     t_old = np.array([0.1, 0.0, 0.2])
     _walk(al, poses, (180.0, t_old, d), 0.0, 40, rng)
     al.maybe_fit(now=40.0)
@@ -102,7 +102,7 @@ def test_lost_link_waits_for_walking():
     walking or a T-pose, which the app asks for."""
     rng = np.random.default_rng(2)
     al, poses = HmdAlign(), {}
-    d = np.array([0.0, 0.02, 0.09])
+    d = np.array([0.0, 0.06, 0.09])
     _walk(al, poses, (180.0, np.array([0.1, 0.0, 0.2]), d), 0.0, 40, rng)
     al.maybe_fit(now=40.0)
     x = al.x.copy()
@@ -184,7 +184,7 @@ def test_lying_is_not_learned_from():
     body 11-17 cm off (§46). Pairs with the torso not upright are not learned from, so a link
     learned walking stays as it is."""
     rng = np.random.default_rng(4)
-    d = np.array([0.0, 0.02, 0.09])
+    d = np.array([0.0, 0.06, 0.09])
     al, poses = HmdAlign(), {}
     _walk(al, poses, (180.0, np.array([0.1, 0.0, 0.2]), d), 0.0, 40, rng)
     al.maybe_fit(now=40.0)
@@ -206,7 +206,7 @@ def test_lost_link_forgets_the_old_pairs():
     """A recenter the jump check missed: once the link is lost (off > 10 cm for 5 s), the pairs
     from before are of the old space and go, so the long window does not hold the fit back."""
     rng = np.random.default_rng(5)
-    d = np.array([0.0, 0.02, 0.09])
+    d = np.array([0.0, 0.06, 0.09])
     al, poses = HmdAlign(), {}
     _walk(al, poses, (180.0, np.array([0.1, 0.0, 0.2]), d), 0.0, 60, rng)
     al.maybe_fit(now=60.0)

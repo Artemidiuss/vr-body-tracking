@@ -497,11 +497,12 @@ class TrackerOutput:
         ears = (Su[IDX["left_ear"]] + Su[IDX["right_ear"]]) / 2
         root = ears - 0.04 * sp / np.linalg.norm(sp)
         al, hmd = self.align, self.hmd
-        # The link to the headset takes the ear midpoint (its own 4 cm go along the head, not the
-        # spine) and learns only with the torso upright (§46).
-        self._q_root = ears.copy()
+        # The link to the headset: the ear midpoint 4 cm straight down (the same point standing;
+        # along the spine it slid off the head lying propped up), learned only with the torso
+        # upright (§46).
+        self._q_root = ears - np.array([0.0, 0.04, 0.0])
         if al is not None and hmd is not None and hmd.fresh:
-            al.add(t_ref, ears.copy(), hmd.pose_at, upright=bool(sp[1] > np.cos(np.radians(35)) * np.linalg.norm(sp)))
+            al.add(t_ref, self._q_root.copy(), hmd.pose_at, upright=bool(sp[1] > np.cos(np.radians(35)) * np.linalg.norm(sp)))
         root = self.head_euro(root, t_ref)
         pos = self.head_pred(root[None, :], t_ref)[0]
         ear = Su[IDX["right_ear"]] - Su[IDX["left_ear"]]
